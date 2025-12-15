@@ -1,0 +1,22 @@
+assignee: Иван Иванов
+createdAt: 2025-12-10T12:36:39.661+0000
+createdBy: Иван Иванов
+description: Добавить новые разделы в документацию API.
+followers:
+- Иван Иванов
+key: EXAMPLE-4
+links:
+- createdAt: 2025-12-10T12:37:42.846+0000
+  createdBy: Иван Иванов
+  issue: EXAMPLE-2
+  relationship: depends on
+  updatedAt: 2025-12-10T12:37:49.388+0000
+  updatedBy: Иван Иванов
+priority: minor
+project:
+  primary: '528'
+status: open
+summary: Обновление документации
+type: task
+updatedAt: 2025-12-10T12:54:44.542+0000
+updatedBy: Робот сервиса Tracker Робот

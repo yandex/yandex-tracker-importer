@@ -1,0 +1,23 @@
+assignee: Петр Петров
+createdAt: 2025-12-10T12:32:09.604+0000
+createdBy: Петр Петров
+description: Добавить поддержку формата JSON в обработке данных.
+key: EXAMPLE-2
+links:
+- createdAt: 2025-12-10T12:37:42.846+0000
+  createdBy: Петр Петров
+  issue: EXAMPLE-4
+  relationship: is dependent by
+  updatedAt: 2025-12-10T12:37:49.388+0000
+  updatedBy: Петр Петров
+priority: minor
+project:
+  primary: '528'
+resolution: fixed
+resolvedAt: 2025-12-10T12:44:08.824+0000
+resolvedBy: Петр Петров
+status: closed
+summary: Добавить поддержку нового формата данных
+type: task
+updatedAt: 2025-12-10T12:54:43.941+0000
+updatedBy: Робот сервиса Tracker Робот

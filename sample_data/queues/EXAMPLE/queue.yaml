@@ -1,0 +1,119 @@
+assignAuto: false
+components:
+- assignAuto: false
+  lead: Иван Иванов
+  name: Тестирование
+defaultPriority: normal
+defaultType: task
+denyVoting: false
+issueTypesConfig:
+- issueType: milestone
+  resolutions:
+  - fixed
+  workflow: quickStartV2PresetWorkflow
+- issueType: task
+  resolutions:
+  - fixed
+  workflow: quickStartV2PresetWorkflow
+key: EXAMPLE
+lead: Иван Иванов
+name: Тестовая очередь
+permissions:
+  create:
+    roles:
+    - queue-lead
+    users:
+    - Робот сервиса Tracker Робот
+  grant:
+    roles:
+    - queue-lead
+    users:
+    - Робот сервиса Tracker Робот
+  read:
+    roles:
+    - follower
+    - access
+  write:
+    roles:
+    - queue-lead
+    - assignee
+    - author
+    users:
+    - Робот сервиса Tracker Робот
+triggers:
+- actions:
+  - fromRobot: false
+    text: Задача принята! Скоро найдём исполнителя.
+    type: CreateComment
+  active: true
+  conditions:
+  - conditions:
+    - type: Event.create
+    type: And
+  name: Мой триггер
+workflows:
+- initialAction:
+    name:
+      en: Create
+      ru: Создать
+    target: open
+  key: quickStartV2PresetWorkflow
+  name: Quick start
+  steps:
+  - actions:
+    - name:
+        en: Start Progress
+        ru: В работу
+      target: inProgress
+    - name:
+        en: Need Info
+        ru: Нужна информация
+      target: needInfo
+    - name:
+        en: Close
+        ru: Закрыть
+      target: closed
+    status: open
+  - actions:
+    - name:
+        en: Stop Progress
+        ru: Переоткрыть
+      target: open
+    - name:
+        en: Need Info
+        ru: Нужна информация
+      target: needInfo
+    - name:
+        en: Close
+        ru: Закрыть
+      target: closed
+    status: inProgress
+  - actions:
+    - name:
+        en: Provide Info
+        ru: Предоставить информацию
+      target: open
+    - name:
+        en: Start Progress
+        ru: В работу
+      target: inProgress
+    - name:
+        en: Close
+        ru: Закрыть
+      target: closed
+    status: needInfo
+  - actions:
+    - name:
+        en: Reopen
+        ru: Переоткрыть
+      target: open
+    - name:
+        en: Need Info
+        ru: Нужна информация
+      target: needInfo
+    - name:
+        en: Start Progress
+        ru: В работу
+      target: inProgress
+    status: closed
+  type: visual

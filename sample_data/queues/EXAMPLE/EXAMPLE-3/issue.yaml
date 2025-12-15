@@ -1,0 +1,23 @@
+assignee: Иван Иванов
+comments:
+- createdAt: 2025-12-10T12:34:52.831+0000
+  createdBy: Иван Иванов
+  text: Сервис падает при высоком RPS
+  updatedAt: 2025-12-10T12:34:52.831+0000
+  updatedBy: Иван Иванов
+components:
+- Тестирование
+createdAt: 2025-12-10T12:34:13.833+0000
+createdBy: Иван Иванов
+description: Провести нагрузочное тестирование сервиса.
+followers:
+- Иван Иванов
+key: EXAMPLE-3
+priority: blocker
+project:
+  primary: '528'
+status: open
+summary: Проверка производительности
+type: task
+updatedAt: 2025-12-10T12:54:44.250+0000
+updatedBy: Робот сервиса Tracker Робот

@@ -1,0 +1,24 @@
+- description: Need info status
+  key: needInfo
+  name:
+    en: Need Info
+    ru: Требуется информация
+  type: paused
+- description: Closed status
+  key: closed
+  name:
+    en: Closed
+    ru: Закрыт
+  type: done
+- description: In progress status
+  key: inProgress
+  name:
+    en: In Progress
+    ru: В работе
+  type: inProgress
+- description: Open status
+  key: open
+  name:
+    en: Open
+    ru: Открыт
+  type: new

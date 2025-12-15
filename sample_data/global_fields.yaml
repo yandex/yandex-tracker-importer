@@ -1,0 +1,212 @@
+- category: Системные
+  description: null
+  key: type
+  name:
+    en: Type
+    ru: Тип
+  optionsProvider:
+    type: IssueTypeOptionsProvider
+  schema:
+    required: true
+    type: issuetype
+- category: Системные
+  description: null
+  key: priority
+  name:
+    en: Priority
+    ru: Приоритет
+  optionsProvider:
+    type: PriorityOptionsProvider
+  schema:
+    required: true
+    type: priority
+- category: Системные
+  description: null
+  key: key
+  name:
+    en: Key
+    ru: Ключ
+  optionsProvider: null
+  schema:
+    required: true
+    type: string
+- category: Системные
+  description: null
+  key: summary
+  name:
+    en: Summary
+    ru: Задача
+  optionsProvider: null
+  schema:
+    required: true
+    type: string
+- category: Системные
+  description: null
+  key: description
+  name:
+    en: Description
+    ru: Описание
+  optionsProvider: null
+  schema:
+    required: false
+    type: text
+- category: Системные
+  description: null
+  key: status
+  name:
+    en: Status
+    ru: Статус
+  optionsProvider:
+    type: StatusOptionsProvider
+  schema:
+    required: true
+    type: status
+- category: Системные
+  description: null
+  key: resolution
+  name:
+    en: Resolution
+    ru: Резолюция
+  optionsProvider:
+    type: ResolutionOptionsProvider
+  schema:
+    required: false
+    type: resolution
+- category: Системные
+  description: null
+  key: createdAt
+  name:
+    en: Created
+    ru: Создано
+  optionsProvider: null
+  schema:
+    required: true
+    type: datetime
+- category: Системные
+  description: null
+  key: updatedAt
+  name:
+    en: Updated
+    ru: Обновлено
+  optionsProvider: null
+  schema:
+    required: true
+    type: datetime
+- category: Системные
+  description: null
+  key: resolvedAt
+  name:
+    en: Resolved
+    ru: Разрешен
+  optionsProvider: null
+  schema:
+    required: false
+    type: datetime
+- category: Системные
+  description: null
+  key: createdBy
+  name:
+    en: Author
+    ru: Автор
+  optionsProvider:
+    type: TeamOptionsProvider
+  schema:
+    required: true
+    type: user
+- category: Системные
+  description: null
+  key: assignee
+  name:
+    en: Assignee
+    ru: Исполнитель
+  optionsProvider:
+    type: TeamOptionsProvider
+  schema:
+    required: false
+    type: user
+- category: Системные
+  description: null
+  key: followers
+  name:
+    en: Followers
+    ru: Наблюдатели
+  optionsProvider:
+    type: TeamOptionsProvider
+  schema:
+    items: user
+    type: array
+- category: Системные
+  description: null
+  key: updatedBy
+  name:
+    en: Modifier
+    ru: Изменил
+  optionsProvider:
+    type: TeamOptionsProvider
+  schema:
+    required: true
+    type: user
+- category: Системные
+  description: null
+  key: resolvedBy
+  name:
+    en: Resolver
+    ru: Решивший
+  optionsProvider: null
+  schema:
+    required: false
+    type: user
+- category: Системные
+  description: null
+  key: project
+  name:
+    en: Project
+    ru: Проект
+  optionsProvider:
+    type: ProjectOptionsProvider
+  schema:
+    required: false
+    type: project
+- category: Системные
+  description: null
+  key: components
+  name:
+    en: Components
+    ru: Компоненты
+  optionsProvider:
+    type: ComponentOptionsProvider
+  schema:
+    items: component
+    type: array
+- category: Системные
+  description: null
+  key: affectedVersions
+  name:
+    en: Affected Version
+    ru: Найдено в версиях
+  optionsProvider:
+    type: VersionOptionsProvider
+  schema:
+    items: version
+    type: array
+- category: Системные
+  description: null
+  key: fixVersions
+  name:
+    en: Fix Version
+    ru: Исправить в версиях
+  optionsProvider:
+    type: VersionOptionsProvider
+  schema:
+    items: version
+    type: array
+- category: Системные
+  description: null
+  key: checklistItems
+  name:
+    en: Checklist
+    ru: Чеклист
+  optionsProvider: null
+  schema:
+    items: checklistItem
+    type: array

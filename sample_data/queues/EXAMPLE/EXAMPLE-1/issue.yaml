@@ -1,0 +1,46 @@
+assignee: Иван Иванов
+attachments:
+- createdAt: 2025-12-10T12:39:18.594+0000
+  createdBy: Петр Петров
+  filename: image_1246.png
+  name: image.png
+checklistItems:
+- assignee: Петр Петров
+  checked: false
+  checklistItemType: standard
+  deadline:
+    date: 2025-12-11T21:00:00.000+0000
+    deadlineType: date
+    isExceeded: false
+  text: Локализовать ошибку
+- checked: false
+  checklistItemType: standard
+  deadline:
+    date: 2025-12-15T21:00:00.000+0000
+    deadlineType: date
+    isExceeded: false
+  text: Внести исправления
+- checked: false
+  checklistItemType: standard
+  deadline:
+    date: 2025-12-11T21:00:00.000+0000
+    deadlineType: date
+    isExceeded: false
+  text: Написать тесты
+components:
+- Тестирование
+createdAt: 2025-12-10T12:30:47.538+0000
+createdBy: Иван Иванов
+description: 'Проблема в API
+
+  ![image_1246.png]() '
+key: EXAMPLE-1
+links: []
+priority: critical
+project:
+  primary: '528'
+status: inProgress
+summary: Исправление бага в авторизации
+type: task
+updatedAt: 2025-12-10T12:54:43.137+0000
+updatedBy: Робот сервиса Tracker Робот

@@ -1,0 +1,36 @@
+
+author: Иван Иванов
+createdAt: 2025-12-10T13:04:05.969+0000
+createdBy: Иван Иванов
+end: '2026-12-31'
+entityStatus: draft
+entityType: portfolio
+id: 530
+key: Развитие сервиса_530
+lead: Иван Иванов
+links:
+- entity: 528
+  relationship: depends on
+- entity: 529
+  relationship: works towards
+permissions:
+  acl:
+    GRANT:
+      roles:
+      - AUTHOR
+      - OWNER
+      users:
+      - Робот сервиса Tracker Робот
+    WRITE:
+      groups:
+      - Все сотрудники
+      roles:
+      - CLIENT
+      - AUTHOR
+      - MEMBER
+      - OWNER
+      - FOLLOWER
+      users:
+      - Робот сервиса Tracker Робот
+summary: Развитие сервиса
+updatedAt: 2025-12-10T13:04:29.525+0000

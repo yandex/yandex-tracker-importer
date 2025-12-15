@@ -1,0 +1,26 @@
+assignee: Иван Иванов
+comments:
+- createdAt: 2025-12-10T12:41:18.373+0000
+  createdBy: Иван Иванов
+  text: Задача принята! Скоро найдём исполнителя.
+  updatedAt: 2025-12-10T12:41:18.373+0000
+  updatedBy: Иван Иванов
+- createdAt: 2025-12-10T12:42:45.209+0000
+  createdBy: Петр Петров
+  text: Какую систему сборки нужно использовать?
+  updatedAt: 2025-12-10T12:42:45.209+0000
+  updatedBy: Петр Петров
+createdAt: 2025-12-10T12:41:18.373+0000
+createdBy: Иван Иванов
+description: Настроить автоматическую сборку и деплой.
+followers:
+- Иван Иванов
+key: EXAMPLE-5
+priority: normal
+project:
+  primary: '528'
+status: needInfo
+summary: Настройка CI/CD
+type: task
+updatedAt: 2025-12-10T12:54:43.617+0000
+updatedBy: Робот сервиса Tracker Робот

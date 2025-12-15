@@ -1,0 +1,4 @@
+tqdm>=4.67.1,<5.0.0
+click>=8.1.8,<9.0.0
+pyaml>=24.9.0,<25.0.0
+yandex-tracker-client>=2.10

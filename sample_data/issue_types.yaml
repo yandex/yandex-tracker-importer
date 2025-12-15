@@ -1,0 +1,10 @@
+- description: Task issue type
+  key: task
+  name:
+    en: Task
+    ru: Задача
+- description: Milestone issue type
+  key: milestone
+  name:
+    en: Milestone
+    ru: Веха

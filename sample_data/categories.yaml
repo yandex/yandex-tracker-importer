@@ -1,0 +1,20 @@
+- name:
+    en: System
+    ru: Системные
+  order: 1
+- name:
+    en: Agile
+    ru: Agile
+  order: 1
+- name:
+    en: Time Tracking
+    ru: Учёт Времени
+  order: 1
+- name:
+    en: Email
+    ru: Email
+  order: 1
+- name:
+    en: SLA
+    ru: SLA
+  order: 1
