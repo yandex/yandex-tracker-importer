@@ -1,4 +1,5 @@
 {
+  "AGENTS.md":"tracker/scripts/trackin/AGENTS.md",
   "Dockerfile":"tracker/scripts/trackin/Dockerfile",
   "LICENSE":"tracker/scripts/trackin/LICENSE",
   "NOTICES":"tracker/scripts/trackin/NOTICES",
@@ -15,6 +16,7 @@
   "docs/objects/queues.md":"tracker/scripts/trackin/docs/objects/queues.md",
   "docs/objects/resolutions.md":"tracker/scripts/trackin/docs/objects/resolutions.md",
   "docs/objects/statuses.md":"tracker/scripts/trackin/docs/objects/statuses.md",
+  "exporters/trello/AGENTS.md":"tracker/scripts/trackin/exporters/trello/AGENTS.md",
   "exporters/trello/Dockerfile":"tracker/scripts/trackin/exporters/trello/Dockerfile",
   "exporters/trello/README.md":"tracker/scripts/trackin/exporters/trello/README.md",
   "exporters/trello/docs":"tracker/scripts/trackin/exporters/trello/docs",
