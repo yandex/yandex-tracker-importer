@@ -89,7 +89,8 @@ def main() -> None:
         client=dest_client,
         mapper=entity_mapper,
         data_path=data_path,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        ui_url=cfg.dest_tracker_ui
     )
     progress_tracker = importer.do_import()
 

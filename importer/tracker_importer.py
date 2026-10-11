@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
 
+from .constants import DEFAULT_TRACKER_UI_URL
 from .mapper import EntityMapper
 from .utils import get_required_field, load_yaml_file
 from .importers.global_objects import (
@@ -56,11 +57,13 @@ class TrackerImporter:
             mapper: EntityMapper,
             data_path: str,
             max_workers: Optional[int] = None,
+            ui_url: str = DEFAULT_TRACKER_UI_URL,
     ):
         self._client = client
         self._mapper = mapper
         self._data_path = data_path
         self._max_workers = max_workers or os.cpu_count()
+        self._ui_url = ui_url
 
         self._progress_tracker = ImportProgressTracker(data_path)
 
@@ -73,9 +76,9 @@ class TrackerImporter:
         self._global_field_importer = GlobalFieldImporter(client, mapper, data_path, self._category_importer)
         self._workflow_importer = WorkflowImporter(client, mapper)
         self._queue_importer = QueueImporter(client, mapper)
-        self._project_importer = ProjectImporter(client, mapper, self._entity_links_collector)
-        self._goal_importer = GoalImporter(client, mapper, self._entity_links_collector)
-        self._portfolio_importer = PortfolioImporter(client, mapper, self._entity_links_collector)
+        self._project_importer = ProjectImporter(client, mapper, self._entity_links_collector, ui_url)
+        self._goal_importer = GoalImporter(client, mapper, self._entity_links_collector, ui_url)
+        self._portfolio_importer = PortfolioImporter(client, mapper, self._entity_links_collector, ui_url)
 
         self._trigger_importers = {}
         self._triggers_collector = {}
@@ -182,7 +185,8 @@ class TrackerImporter:
                     component_importer=component_importer,
                     version_importer=version_importer,
                     project_importer=self._project_importer,
-                    issue_links_collector=self._issue_links_collector
+                    issue_links_collector=self._issue_links_collector,
+                    ui_url=self._ui_url
                 )
                 self._import_issues_with_threads(queue_dir, issues_importer)
 

@@ -10,6 +10,7 @@ from .base import GetOrCreateImporter
 from .entities import ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
+from ..constants import DEFAULT_TRACKER_UI_URL
 from ..link_collectors import IssueLinksCollector
 from ..exceptions import LocalFieldNotExistsError
 from ..mapper import EntityMapper
@@ -37,9 +38,11 @@ class IssueImporter(GetOrCreateImporter):
         component_importer: ComponentImporter,
         version_importer: VersionImporter,
         project_importer: ProjectImporter,
-        issue_links_collector: IssueLinksCollector
+        issue_links_collector: IssueLinksCollector,
+        ui_url: str = DEFAULT_TRACKER_UI_URL,
     ):
         super().__init__(client, mapper)
+        self._ui_url = ui_url
         self._local_field_importer = local_field_importer
         self._global_field_importer = global_field_importer
         self._component_importer = component_importer
@@ -68,7 +71,7 @@ class IssueImporter(GetOrCreateImporter):
             text_normalizer = TextNormalizer(
                 self._mapper,
                 created_attachments,
-                lambda attachment_id: f"https://tracker.yandex.ru/{issue_obj.key}/attachments/{attachment_id}"
+                lambda attachment_id: f"{self._ui_url}/{issue_obj.key}/attachments/{attachment_id}"
             )
             issue_obj = self._create_local_fields(input_data, issue_obj)
             issue_obj = self._update_description(issue_obj, text_normalizer)

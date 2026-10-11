@@ -19,7 +19,9 @@ data/*.yaml  →  importer (этот проект)  →  Yandex Tracker
 
 1. **Каталог `data/`** — результат экспортёра (или ручной). Без него импортировать
    нечего.
-2. **Адрес API** — по умолчанию `https://api.tracker.yandex.net`.
+2. **Адрес API** — по умолчанию `https://api.tracker.yandex.net`. Для своей инсталляции спроси заодно
+   **адрес интерфейса** (`dest_tracker_ui`, по умолчанию `https://tracker.yandex.ru`) — он подставляется
+   в ссылки на вложения внутри описаний и комментариев.
 3. **OAuth-токен Трекера** — приложение на <https://oauth.yandex.ru> со scope
    `tracker:read` + `tracker:write`.
 4. **ID организации** — ровно одно из двух:
@@ -45,6 +47,7 @@ logs/              # создаётся автоматически
 dest_tracker_api: https://api.tracker.yandex.net
 dest_tracker_token: <OAuth-токен>
 dest_org_id: "<id>"          # ИЛИ dest_cloud_org_id — ровно одно из двух
+dest_tracker_ui: https://tracker.yandex.ru   # необязательный; адрес интерфейса для ссылок на вложения
 ```
 
 ### `mapping/*.cfg` — сопоставления

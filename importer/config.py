@@ -4,6 +4,7 @@ import os
 
 import yaml
 
+from .constants import DEFAULT_TRACKER_UI_URL
 from .exceptions import ConfigValidationError
 
 
@@ -13,10 +14,13 @@ class Config:
     dest_tracker_token: str
     dest_org_id: Optional[str] = None
     dest_cloud_org_id: Optional[str] = None
+    dest_tracker_ui: str = DEFAULT_TRACKER_UI_URL
 
     def __post_init__(self):
         if not self.dest_tracker_api:
             raise ConfigValidationError("dest_tracker_api is required")
+
+        self.dest_tracker_ui = (self.dest_tracker_ui or DEFAULT_TRACKER_UI_URL).rstrip("/")
 
         if not self.dest_tracker_token:
             raise ConfigValidationError("dest_tracker_token is required")
@@ -52,6 +56,7 @@ def load_config(dump_path: str) -> Config:
         dest_tracker_token=config_data.get("dest_tracker_token", ""),
         dest_org_id=config_data.get("dest_org_id"),
         dest_cloud_org_id=config_data.get("dest_cloud_org_id"),
+        dest_tracker_ui=config_data.get("dest_tracker_ui") or DEFAULT_TRACKER_UI_URL,
     )
 
 

@@ -7,7 +7,7 @@ from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
 
 from .base import CachedImporter
-from ..constants import ALL_PARTICIPANTS_GROUP_ID
+from ..constants import ALL_PARTICIPANTS_GROUP_ID, DEFAULT_TRACKER_UI_URL
 from ..exceptions import ProjectNotExistsError
 from ..link_collectors import EntityLinksCollector
 from ..mapper import EntityMapper
@@ -21,9 +21,16 @@ logger = logging.getLogger(__name__)
 class EntityImporter(CachedImporter, ABC):
     _group_name_to_id_map = dict()
 
-    def __init__(self, client: TrackerClient, mapper: EntityMapper, entity_links_collector: EntityLinksCollector):
+    def __init__(
+        self,
+        client: TrackerClient,
+        mapper: EntityMapper,
+        entity_links_collector: EntityLinksCollector,
+        ui_url: str = DEFAULT_TRACKER_UI_URL,
+    ):
         super().__init__(client, mapper)
         self._entity_links_collector = entity_links_collector
+        self._ui_url = ui_url
         self._parent_entities = {}
         if not self._group_name_to_id_map:
             self._group_name_to_id_map = {group.name: group.id for group in self._client.groups}
@@ -63,7 +70,7 @@ class EntityImporter(CachedImporter, ABC):
             text_normalizer = TextNormalizer(
                 self._mapper,
                 created_attachments,
-                lambda attachment_id: f"https://tracker.yandex.ru/ajax/v2/attachments/{attachment_id}"
+                lambda attachment_id: f"{self._ui_url}/ajax/v2/attachments/{attachment_id}"
             )
             self._create_comments(input_data.get("comments", []), entity_obj, text_normalizer, summary)
             self._create_checklist(input_data.get("checklist", []), entity_obj, summary)
