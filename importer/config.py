@@ -25,6 +25,14 @@ class Config:
         if not self.dest_tracker_token:
             raise ConfigValidationError("dest_tracker_token is required")
 
+        # идентификатор организации 360 — число, и в конфигурации его естественно записать без
+        # кавычек, а в заголовок запроса значение должно уходить строкой
+        if self.dest_org_id is not None:
+            self.dest_org_id = str(self.dest_org_id)
+
+        if self.dest_cloud_org_id is not None:
+            self.dest_cloud_org_id = str(self.dest_cloud_org_id)
+
         has_org_id = bool(self.dest_org_id)
         has_cloud_org_id = bool(self.dest_cloud_org_id)
 

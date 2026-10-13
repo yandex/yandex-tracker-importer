@@ -185,6 +185,7 @@ class TrackerImporter:
                     component_importer=component_importer,
                     version_importer=version_importer,
                     project_importer=self._project_importer,
+                    goal_importer=self._goal_importer,
                     issue_links_collector=self._issue_links_collector,
                     ui_url=self._ui_url
                 )

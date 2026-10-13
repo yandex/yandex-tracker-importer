@@ -7,10 +7,10 @@ from yandex_tracker_client.objects import Resource
 from yandex_tracker_client.exceptions import BadRequest
 
 from .base import GetOrCreateImporter
-from .entities import ProjectImporter
+from .entities import GoalImporter, ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
-from ..constants import DEFAULT_TRACKER_UI_URL
+from ..constants import DEFAULT_TRACKER_UI_URL, NON_IMPORTABLE_ISSUE_FIELDS
 from ..link_collectors import IssueLinksCollector
 from ..exceptions import LocalFieldNotExistsError
 from ..mapper import EntityMapper
@@ -38,6 +38,7 @@ class IssueImporter(GetOrCreateImporter):
         component_importer: ComponentImporter,
         version_importer: VersionImporter,
         project_importer: ProjectImporter,
+        goal_importer: GoalImporter,
         issue_links_collector: IssueLinksCollector,
         ui_url: str = DEFAULT_TRACKER_UI_URL,
     ):
@@ -48,6 +49,7 @@ class IssueImporter(GetOrCreateImporter):
         self._component_importer = component_importer
         self._version_importer = version_importer
         self._project_importer = project_importer
+        self._goal_importer = goal_importer
         self._issue_links_collector = issue_links_collector
 
     @property
@@ -136,6 +138,21 @@ class IssueImporter(GetOrCreateImporter):
                     else []
                 ),
             },
+            "linkedGoals": {
+                "primary": (
+                    self._goal_importer.get_goal_by_reference(input_data["linkedGoals"]["primary"]).shortId
+                    if input_data.get("linkedGoals") and input_data["linkedGoals"].get("primary")
+                    else None
+                ),
+                "secondary": (
+                    [
+                        self._goal_importer.get_goal_by_reference(goal_reference).shortId
+                        for goal_reference in input_data["linkedGoals"]["secondary"]
+                    ]
+                    if input_data.get("linkedGoals") and input_data["linkedGoals"].get("secondary")
+                    else []
+                ),
+            },
             "tags": input_data.get("tags", []),
             "followingMaillists": input_data.get("followingMaillists", []),
             "originalEstimation": input_data.get("originalEstimation"),
@@ -146,6 +163,10 @@ class IssueImporter(GetOrCreateImporter):
         }
 
         for key, value in input_data.items():
+            if key in NON_IMPORTABLE_ISSUE_FIELDS:
+                logger.info(f"Field {key} is not supported by import API, skipping it for issue {issue_key}")
+                continue
+
             if (
                 key not in prepared_data
                 and not key.startswith("local_")

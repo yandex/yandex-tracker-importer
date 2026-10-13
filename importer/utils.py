@@ -30,6 +30,9 @@ def prepare_checklist_item_data(checklist_item: Dict[str, Any], mapper: EntityMa
         "checked": checklist_item.get("checked"),
         "assignee": mapper.get_user(checklist_item.get("assignee")),
         "deadline": checklist_item.get("deadline"),
+        # пункт чеклиста может быть не только текстовым, но и метрикой, критерием или фильтром
+        "checklistItemType": checklist_item.get("checklistItemType"),
+        "url": checklist_item.get("url"),
     }
 
 

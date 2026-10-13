@@ -126,7 +126,7 @@ class AutomationImporter(CachedImporter):
                 case "Move":
                     prepared_data["queue"] = self._mapper.get_queue(action_data.get("queue"))
                 case "CreateComment":
-                    prepared_data["text"] = action_data["text"]
+                    prepared_data["text"] = action_data.get("text")
                     prepared_data["fromRobot"] = action_data.get("fromRobot")
                 case "CreateChecklist":
                     prepared_data["checklistItems"] = [
@@ -320,6 +320,7 @@ class AutoactionImporter(AutomationImporter):
             "name": input_data["name"],
             "active": input_data.get("active"),
             "enableNotifications": input_data.get("enableNotifications"),
+            "intervalMillis": input_data.get("intervalMillis"),
             "actions": self._prepare_actions_data(input_data["actions"]),
         }
 

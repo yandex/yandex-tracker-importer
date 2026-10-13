@@ -8,7 +8,7 @@ from yandex_tracker_client.objects import Resource
 
 from .base import CachedImporter
 from ..constants import ALL_PARTICIPANTS_GROUP_ID, DEFAULT_TRACKER_UI_URL
-from ..exceptions import ProjectNotExistsError
+from ..exceptions import GoalNotExistsError, ProjectNotExistsError
 from ..link_collectors import EntityLinksCollector
 from ..mapper import EntityMapper
 from ..text_normalizer import TextNormalizer
@@ -32,6 +32,7 @@ class EntityImporter(CachedImporter, ABC):
         self._entity_links_collector = entity_links_collector
         self._ui_url = ui_url
         self._parent_entities = {}
+        self._entities_by_name = {}
         if not self._group_name_to_id_map:
             self._group_name_to_id_map = {group.name: group.id for group in self._client.groups}
 
@@ -52,13 +53,13 @@ class EntityImporter(CachedImporter, ABC):
     def get_or_create(self, input_data: Dict[str, Any], attachments_path: str) -> Optional[Resource]:
         entity_obj = self._try_getting_object(input_data)
         if entity_obj is not None:
-            self._put_to_cache(self._get_key(input_data), entity_obj)
+            self._cache_entity(input_data, entity_obj)
             return entity_obj
 
         entity_obj = self._try_creating_object(input_data)
         if entity_obj is not None:
             summary = input_data["summary"]
-            self._put_to_cache(self._get_key(input_data), entity_obj)
+            self._cache_entity(input_data, entity_obj)
             self._update_permissions(input_data.get("permissions"), entity_obj, summary)
 
             created_attachments = self._create_attachments(
@@ -73,7 +74,13 @@ class EntityImporter(CachedImporter, ABC):
                 lambda attachment_id: f"{self._ui_url}/ajax/v2/attachments/{attachment_id}"
             )
             self._create_comments(input_data.get("comments", []), entity_obj, text_normalizer, summary)
-            self._create_checklist(input_data.get("checklist", []), entity_obj, summary)
+            # формат входных данных описан в docs/: чеклист лежит в checklistItems. Ключ checklist
+            # поддерживается ради данных, подготовленных по прежнему поведению импортёра
+            self._create_checklist(
+                input_data.get("checklistItems") or input_data.get("checklist", []),
+                entity_obj,
+                summary,
+            )
             self._update_description(input_data.get("description"), entity_obj, text_normalizer, summary)
 
             self._entity_links_collector.add_entity_links(self._get_key(input_data), input_data.get("links", []))
@@ -85,7 +92,10 @@ class EntityImporter(CachedImporter, ABC):
                         else None
                     ),
                     "secondary": (
-                        str(input_data["parentEntity"]["secondary"])
+                        [
+                            str(parent_id)
+                            for parent_id in input_data["parentEntity"]["secondary"]
+                        ]
                         if input_data.get("parentEntity") and input_data["parentEntity"].get("secondary")
                         else []
                     ),
@@ -112,6 +122,22 @@ class EntityImporter(CachedImporter, ABC):
                 "entityStatus": input_data.get("entityStatus"),
             }
         }
+
+    def _cache_entity(self, input_data: Dict[str, Any], entity_obj: Resource) -> None:
+        self._put_to_cache(self._get_key(input_data), entity_obj)
+        self._entities_by_name.setdefault(input_data.get("summary"), []).append(entity_obj)
+
+    def get_by_name(self, summary: str) -> Optional[Resource]:
+        """Названия сущностей в Трекере не уникальны, поэтому неоднозначная ссылка не используется."""
+        entities = self._entities_by_name.get(summary, [])
+        if len(entities) > 1:
+            logger.warning(
+                f"Found {len(entities)} objects {self.object_name} named {summary}, "
+                "the reference by name is ambiguous"
+            )
+            return None
+
+        return entities[0] if entities else None
 
     def _get_key(self, input_data: Dict[str, Any]) -> str:
         if "id" not in input_data:
@@ -285,6 +311,18 @@ class GoalImporter(EntityImporter):
     def objects(self):
         return self._client.goal
 
+    def get_goal_by_reference(self, goal_reference: Any) -> Resource:
+        if isinstance(goal_reference, dict):
+            # задачи, выгруженные прежними версиями экспортёра, ссылаются на цель её названием
+            goal_obj = self.get_by_name(goal_reference.get("display"))
+        else:
+            goal_obj = self.get_from_cache(str(goal_reference))
+
+        if goal_obj is None:
+            raise GoalNotExistsError(goal_reference)
+
+        return goal_obj
+
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         data = super()._prepare_data(input_data)
         data["fields"]["keyResultItems"] = [
@@ -295,10 +333,18 @@ class GoalImporter(EntityImporter):
                 "deadline": self._prepare_deadline_data(item.get("deadline")),
                 "progress": self._prepare_progress_data(item.get("progress")),
                 "achieved": item.get("achieved"),
+                "status": self._prepare_key_result_status(item.get("status")),
             }
             for item in input_data.get("keyResultItems", [])
         ]
         return clean_empty(data)
+
+    def _prepare_key_result_status(self, status_data: Any) -> Optional[str]:
+        # цели, выгруженные прежними версиями экспортёра, хранят статус объектом
+        if isinstance(status_data, dict):
+            return status_data.get("id")
+
+        return status_data
 
     def _prepare_deadline_data(self, deadline_data: Dict[str, Any]) -> Optional[str]:
         if not deadline_data:

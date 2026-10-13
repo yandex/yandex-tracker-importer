@@ -75,6 +75,14 @@ class ProjectNotExistsError(BaseTrackerError):
         self.shortId = shortId
 
 
+class GoalNotExistsError(BaseTrackerError):
+    object_name = "Goal"
+
+    def __init__(self, reference: str):
+        super().__init__(f"{self.object_name} {reference} does not exist")
+        self.reference = reference
+
+
 class ObjectWithDataNotCreatedError(BaseTrackerError):
     object_name = "Object"
 

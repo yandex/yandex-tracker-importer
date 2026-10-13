@@ -41,7 +41,9 @@
 | `text`<span style="color: red;">*</span> | Строка     | Текст чеклиста                                   |
 | `checked`                                | Логический | Отметка о выполнении пункта                      |
 | `assignee`                               | Строка     | Логин исполнителя пункта чеклиста                |
-| `deadline`                               | Строка     | Дедлайн в формате `YYYY-MM-DDThh:mm:ss.sss+hhmm` |
+| `deadline`                               | Объект     | Дедлайн пункта чеклиста (структура — ниже)       |
+| `checklistItemType`                      | Строка     | Вид пункта чеклиста: `standard`, `metric`, `criterion` или `filter` |
+| `url`                                    | Строка     | Адрес, на который ссылается пункт вида `metric` или `filter` |
 
 ---
 
