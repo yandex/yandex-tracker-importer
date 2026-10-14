@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
@@ -10,7 +10,7 @@ from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
 from ..exceptions import MissingFieldError
 from ..mapper import EntityMapper
-from ..utils import prepare_checklist_item_data, map_custom_user_field_value
+from ..utils import prepare_field_value, prepare_checklist_item_data
 
 
 logger = logging.getLogger(__name__)
@@ -62,43 +62,14 @@ class AutomationImporter(CachedImporter):
         return update_data
 
     def _prepare_field_value(self, field_obj: Resource, value: Any) -> Any:
-        def process_value(val: Any, processor_func: Callable) -> Any:
-            if val is None:
-                return None
-            if isinstance(val, list):
-                return [processor_func(v) for v in val]
-            return processor_func(val)
-
-        match field_obj.key:
-            case "status":
-                return process_value(value, self._mapper.get_status)
-            case "priority":
-                return process_value(value, self._mapper.get_priority)
-            case "type":
-                return process_value(value, self._mapper.get_issue_type)
-            case "resolution":
-                return process_value(value, self._mapper.get_resolution)
-            case "parent":
-                return process_value(value, self._mapper.get_issue_key)
-            case "queue" | "lastQueue" | "previousQueue":
-                return process_value(value, self._mapper.get_queue)
-            case "project":
-                return process_value(
-                    value,
-                    lambda v: self._project_importer.get_project_by_id(str(v)).shortId,
-                )
-            case "components":
-                return process_value(
-                    value,
-                    lambda v: self._component_importer.get_component_by_name(v).id,
-                )
-            case "fixVersions" | "affectedVersions":
-                return process_value(
-                    value,
-                    lambda v: self._version_importer.get_version_by_name(v).id,
-                )
-            case _:
-                return map_custom_user_field_value(field_obj, value, self._mapper)
+        return prepare_field_value(
+            field_obj,
+            value,
+            self._mapper,
+            project_importer=self._project_importer,
+            component_importer=self._component_importer,
+            version_importer=self._version_importer,
+        )
 
     def _get_or_create_field(self, field_key: str) -> Resource:
         if field_key.startswith("local_"):

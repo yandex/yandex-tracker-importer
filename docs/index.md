@@ -10,6 +10,8 @@
 - [Проекты](./objects/projects.md)
 - [Портфели](./objects/portfolios.md)
 - [Цели](./objects/goals.md)
+- [Дашборды](./objects/dashboards.md)
+- [Сохранённые фильтры](./objects/filters.md)
 
 ## Пример структуры файлов с данными
 

@@ -30,6 +30,8 @@ from .importers.fields import (
     LocalFieldImporter,
     GlobalFieldImporter
 )
+from .importers.dashboards import DashboardImporter
+from .importers.filters import FilterImporter
 from .importers.entities import (
     EntityImporter,
     ProjectImporter,
@@ -56,12 +58,16 @@ class TrackerImporter:
             client: TrackerClient,
             mapper: EntityMapper,
             data_path: str,
+            state_path: Optional[str] = None,
             max_workers: Optional[int] = None,
             ui_url: str = DEFAULT_TRACKER_UI_URL,
     ):
         self._client = client
         self._mapper = mapper
         self._data_path = data_path
+        # состояние импорта живёт рядом с рабочим каталогом, а не внутри выгрузки:
+        # выгрузку копируют между людьми, и чужое состояние уехало бы вместе с ней
+        self._state_path = state_path or data_path
         self._max_workers = max_workers or os.cpu_count()
         self._ui_url = ui_url
 
@@ -80,6 +86,13 @@ class TrackerImporter:
         self._goal_importer = GoalImporter(client, mapper, self._entity_links_collector, ui_url)
         self._portfolio_importer = PortfolioImporter(client, mapper, self._entity_links_collector, ui_url)
 
+        self._filter_importer = FilterImporter(
+            client, mapper, self._global_field_importer, self._state_path
+        )
+        self._dashboard_importer = DashboardImporter(
+            client, mapper, self._global_field_importer, self._filter_importer, ui_url
+        )
+
         self._trigger_importers = {}
         self._triggers_collector = {}
 
@@ -89,11 +102,83 @@ class TrackerImporter:
         self._import_queues()
         self._import_issue_links_with_threads()
         self._import_triggers()
+        # дашборды последними: их виджеты ссылаются на очереди, поля и фильтры
+        self._import_filters()
+        self._import_dashboards()
+        self._update_entities_metrics()
 
         return self._progress_tracker
 
+    def _update_entities_metrics(self) -> None:
+        """Метрики проставляются после дашбордов: до их импорта адрес виджета ещё неизвестен."""
+        widget_urls = self._dashboard_importer.widget_urls
+
+        for importer in [self._project_importer, self._goal_importer, self._portfolio_importer]:
+            for entity_id, metric_items in importer.metric_items.items():
+                entity_obj = importer.get_from_cache(entity_id)
+                if entity_obj is None:
+                    continue
+
+                prepared_items = [
+                    prepared_item
+                    for prepared_item in (
+                        self._prepare_metric_item(item, widget_urls, entity_id)
+                        for item in metric_items
+                    )
+                    if prepared_item is not None
+                ]
+                if not prepared_items:
+                    continue
+
+                try:
+                    entity_obj.update(fields={"metricItems": prepared_items})
+                except Exception:
+                    logger.exception(
+                        f"Error updating metrics of entity {entity_id} with data: {prepared_items}"
+                    )
+
+    @staticmethod
+    def _prepare_metric_item(
+        metric_item: Dict[str, Any], widget_urls: Dict[str, str], entity_id: str
+    ) -> Optional[Dict[str, Any]]:
+        if metric_item.get("widget"):
+            widget_url = widget_urls.get(str(metric_item["widget"]))
+            if widget_url is None:
+                logger.warning(
+                    f"Widget {metric_item['widget']} of entity {entity_id} was not imported, "
+                    "its metric is skipped"
+                )
+                return None
+
+            return {"text": metric_item.get("text"), "url": widget_url}
+
+        return {"text": metric_item.get("text"), "url": metric_item.get("url")}
+
+    def _import_filters(self) -> None:
+        filters_path = os.path.join(self._data_path, "filters.yaml")
+        if not os.path.exists(filters_path):
+            return
+
+        for filter_data in load_yaml_file(filters_path) or []:
+            self._filter_importer.get_or_create(filter_data)
+
+    def _import_dashboards(self) -> None:
+        dashboards_path = os.path.join(self._data_path, "dashboards")
+        if not os.path.exists(dashboards_path):
+            return
+
+        for dirname in sorted(os.listdir(dashboards_path)):
+            dashboard_path = os.path.join(dashboards_path, dirname, "dashboard.yaml")
+            if not os.path.exists(dashboard_path):
+                continue
+
+            self._dashboard_importer.get_or_create(load_yaml_file(dashboard_path))
+
     def _import_queues(self) -> None:
         queues_path = os.path.join(self._data_path, "queues")
+        if not os.path.exists(queues_path):
+            return
+
         queue_dirs = [
             os.path.join(queues_path, dirname)
             for dirname in os.listdir(queues_path)

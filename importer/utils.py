@@ -107,3 +107,60 @@ def retry(
 
         return wrapper
     return decorator
+
+
+def prepare_field_value(
+    field_obj: Resource,
+    value: Any,
+    mapper: "EntityMapper",
+    project_importer: Any = None,
+    component_importer: Any = None,
+    version_importer: Any = None,
+) -> Any:
+    """Приводит значение поля к целевой организации.
+
+    Компоненты, версии и проекты существуют в рамках очереди, поэтому их импортёры передаются не
+    всегда: у фильтра очереди нет, и такие значения остаются как есть."""
+
+    def process_value(val: Any, processor_func: Callable) -> Any:
+        if val is None:
+            return None
+        if isinstance(val, list):
+            return [processor_func(v) for v in val]
+        return processor_func(val)
+
+    match field_obj.key:
+        case "status":
+            return process_value(value, mapper.get_status)
+        case "priority":
+            return process_value(value, mapper.get_priority)
+        case "type":
+            return process_value(value, mapper.get_issue_type)
+        case "resolution":
+            return process_value(value, mapper.get_resolution)
+        case "parent":
+            return process_value(value, mapper.get_issue_key)
+        case "queue" | "lastQueue" | "previousQueue":
+            return process_value(value, mapper.get_queue)
+        case "project" if project_importer is not None:
+            return process_value(value, lambda v: project_importer.get_project_by_id(str(v)).shortId)
+        case "components" if component_importer is not None:
+            return process_value(value, lambda v: component_importer.get_component_by_name(v).id)
+        case "fixVersions" | "affectedVersions" if version_importer is not None:
+            return process_value(value, lambda v: version_importer.get_version_by_name(v).id)
+        case "project" | "components" | "fixVersions" | "affectedVersions":
+            logger.warning(
+                f"Field {field_obj.key} is bound to a queue and is left as is: {value}"
+            )
+            return value
+        case _:
+            return map_custom_user_field_value(field_obj, value, mapper)
+
+
+def get_optional(obj: Any, key: str, default: Any = None) -> Any:
+    """Незаполненные поля API не возвращает вовсе, а обращение по ключу к отсутствующему полю
+    ресурса завершается ошибкой, поэтому необязательные поля читаются через эту функцию."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+
+    return getattr(obj, key, default)

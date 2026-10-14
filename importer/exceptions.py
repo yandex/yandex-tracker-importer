@@ -111,5 +111,36 @@ class VersionNotCreatedError(ObjectWithDataNotCreatedError):
     object_name = "Version"
 
 
+class DashboardNotUniqueError(BaseTrackerError):
+    def __init__(self, name: str, count: int):
+        super().__init__(
+            f"Found {count} dashboards named {name}, the one to update is ambiguous"
+        )
+        self.name = name
+
+
+class FilterNotImportedError(BaseTrackerError):
+    def __init__(self, filter_id: str):
+        super().__init__(f"Filter {filter_id} was not imported, the widget is skipped")
+        self.filter_id = filter_id
+
+
+class LocalFieldNotSupportedError(BaseTrackerError):
+    def __init__(self, key: str):
+        super().__init__(
+            f"Local field {key} is bound to a queue and cannot be used outside of it"
+        )
+        self.key = key
+
+
+class FilterNameConflictError(BaseTrackerError):
+    def __init__(self, name: str):
+        super().__init__(
+            f"Filter named {name} already exists for its owner. If it was created by a previous "
+            "run, restore state/filters.cfg; otherwise rename the filter in the dump"
+        )
+        self.name = name
+
+
 class ConfigValidationError(Exception):
     pass

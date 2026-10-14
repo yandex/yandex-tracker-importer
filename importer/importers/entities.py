@@ -32,6 +32,7 @@ class EntityImporter(CachedImporter, ABC):
         self._entity_links_collector = entity_links_collector
         self._ui_url = ui_url
         self._parent_entities = {}
+        self._metric_items = {}
         self._entities_by_name = {}
         if not self._group_name_to_id_map:
             self._group_name_to_id_map = {group.name: group.id for group in self._client.groups}
@@ -49,6 +50,12 @@ class EntityImporter(CachedImporter, ABC):
     @property
     def parent_entities(self) -> Dict[str, str]:
         return self._parent_entities
+
+    @property
+    def metric_items(self) -> Dict[str, Any]:
+        """Метрики ссылаются на виджеты дашбордов, а дашборды импортируются после сущностей,
+        поэтому метрики проставляются отдельным проходом."""
+        return self._metric_items
 
     def get_or_create(self, input_data: Dict[str, Any], attachments_path: str) -> Optional[Resource]:
         entity_obj = self._try_getting_object(input_data)
@@ -82,6 +89,9 @@ class EntityImporter(CachedImporter, ABC):
                 summary,
             )
             self._update_description(input_data.get("description"), entity_obj, text_normalizer, summary)
+
+            if input_data.get("metricItems"):
+                self._metric_items[self._get_key(input_data)] = input_data["metricItems"]
 
             self._entity_links_collector.add_entity_links(self._get_key(input_data), input_data.get("links", []))
             if input_data.get("parentEntity"):

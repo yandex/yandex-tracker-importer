@@ -29,6 +29,8 @@ def init_logging(dump_path: str, log_level: str = "INFO") -> None:
 
 def get_tracker_client(api_url: str, token: str, org_id: str = None, cloud_org_id: str = None):
     return tracker_client.TrackerClient(
+        # по заголовку в журналах Трекера видно, какой инструмент создаёт нагрузку
+        headers={"User-Agent": "trackin"},
         token=token,
         org_id=org_id,
         base_url=api_url,
@@ -89,6 +91,7 @@ def main() -> None:
         client=dest_client,
         mapper=entity_mapper,
         data_path=data_path,
+        state_path=project_path,
         max_workers=args.max_workers,
         ui_url=cfg.dest_tracker_ui
     )
