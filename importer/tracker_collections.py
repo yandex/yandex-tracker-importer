@@ -37,7 +37,9 @@ class Dashboards(Collection):
 
     def set_widgets_state(self, dashboard_id: Any, version: Any, widgets: List[Dict[str, Any]]):
         """Раскладывает виджеты по дашборду: при создании виджет положения не принимает, его
-        задаёт отдельное обновление дашборда — и только вместе с его версией."""
+        задаёт отдельное обновление дашборда — и только вместе с его версией.
+
+        Список заменяет набор виджетов целиком: виджет, которого в нём нет, удаляется."""
         return self._execute_request(
             self._connection.patch,
             path=f"/{{api_version}}/dashboards/{dashboard_id}",
@@ -47,7 +49,7 @@ class Dashboards(Collection):
 
 
 class Widgets(Collection):
-    # виджет создаётся в дашборде, собственного удаления у него нет
+    # виджет создаётся в дашборде, а удаляется обновлением набора виджетов (см. set_widgets_state)
     path = "/{api_version}/widgets/{id}"
     fields = {
         "id": None,
