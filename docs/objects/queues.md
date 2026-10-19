@@ -156,6 +156,11 @@
 | `conditions`                                | Массив объектов | Массив с условиями срабатывания триггера. Подробнее в разделе [Объекты условий срабатывания триггера](https://yandex.ru/support/tracker/ru/concepts/queues/change-trigger-conditions) |
 | `active`                                    | Логический      | Статус триггера. <br>`true` - активный; <br>`false` - неактивный    |
 
+Группы в условиях записываются не номерами, как в API, а названиями: в `value` у условий
+`UserInGroups` и `UserNotInGroups` и в `groups` у `CommentAuthorInGroups` и
+`CommentAuthorNotInGroups`. Импорт находит группу в целевой организации по названию; если там она
+называется иначе, соответствие задаётся в `mapping/groups.cfg` (см. [docs/index.md](../index.md)).
+
 ---
 
 ## Структура `autoactions`

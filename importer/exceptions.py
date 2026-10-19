@@ -83,6 +83,14 @@ class GoalNotExistsError(BaseTrackerError):
         self.reference = reference
 
 
+class GroupNotExistsError(BaseTrackerError):
+    object_name = "Group"
+
+    def __init__(self, name: str):
+        super().__init__(f"{self.object_name} {name} does not exist")
+        self.name = name
+
+
 class ObjectWithDataNotCreatedError(BaseTrackerError):
     object_name = "Object"
 

@@ -10,6 +10,7 @@ from ..exceptions import (
     ComponentNotExistsError,
     VersionNotExistsError
 )
+from ..groups import GroupResolver
 from ..mapper import EntityMapper
 from ..utils import clean_empty
 
@@ -96,13 +97,11 @@ class WorkflowImporter(GetOrCreateImporter):
 
 
 class QueueImporter(GetOrCreateImporter):
-    _group_name_to_id_map = dict()
-
     def __init__(self, client: TrackerClient, mapper: EntityMapper) -> None:
         super().__init__(client, mapper)
-
-        for group in self._client.groups:
-            self._group_name_to_id_map[group.name] = group.id
+        self._group_resolver = GroupResolver(client, mapper)
+        # до создания очередей: сбой позже оставил бы созданную очередь без прав
+        self._group_resolver.load_groups()
 
     @property
     def object_name(self) -> str:
@@ -155,6 +154,22 @@ class QueueImporter(GetOrCreateImporter):
         except Exception:
             logger.exception(f"Error updating issue types config for queue {queue_obj.key}")
 
+    def _get_groups_ids(self, groups: List[Any], queue_key: str) -> set:
+        """Группа, которой нет в целевой организации, в права не попадает: доступ от этого
+        только сужается. Но молча такое не проходит — иначе права очереди тихо станут уже."""
+        groups_ids = set()
+        for group in groups:
+            group_id = self._group_resolver.get_group_id(group)
+            if group_id is None:
+                logger.warning(
+                    f"Group {group} is not found, it is skipped in permissions of queue {queue_key}: "
+                    "check mapping/groups.cfg"
+                )
+            else:
+                groups_ids.add(group_id)
+
+        return groups_ids
+
     def update_permissions(self, queue_obj: Resource, queue_data: Dict[str, Any]) -> None:
         """
         Добавить разрешения к очереди, сохранив существующие.
@@ -167,10 +182,9 @@ class QueueImporter(GetOrCreateImporter):
         permissions_changes = {}
         permission_types = ["create", "read", "write", "grant"]
         for permission_type in permission_types:
-            groups_add = {
-                self._group_name_to_id_map.get(self._mapper.get_group(group))
-                for group in incoming_permissions.get(permission_type, {}).get("groups", [])
-            }
+            groups_add = self._get_groups_ids(
+                incoming_permissions.get(permission_type, {}).get("groups", []), queue_obj.key
+            )
 
             permissions_changes[permission_type] = {
                 "users": {

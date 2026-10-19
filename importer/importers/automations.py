@@ -8,9 +8,10 @@ from .base import CachedImporter
 from .entities import ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
-from ..exceptions import MissingFieldError
+from ..exceptions import GroupNotExistsError, MissingFieldError
+from ..groups import GroupResolver
 from ..mapper import EntityMapper
-from ..utils import prepare_field_value, prepare_checklist_item_data
+from ..utils import get_required_field, prepare_checklist_item_data, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ class MacrosImporter(AutomationImporter):
 class TriggerImporter(AutomationImporter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._group_resolver = GroupResolver(self._client, self._mapper)
         for trigger in self._queue_obj.triggers:
             self._put_to_cache("{}-{}".format(trigger.queue.key, trigger.name), trigger)
 
@@ -233,8 +235,6 @@ class TriggerImporter(AutomationImporter):
                     | "DateGreaterOrEqualCondition"
                     | "DateLessCondition"
                     | "DateLessOrEqualCondition"
-                    | "UserInGroups"
-                    | "UserNotInGroups"
                     | "Container.SizeGreater"
                     | "Container.SizeGreaterOrEquals"
                     | "Container.SizeLess"
@@ -262,6 +262,14 @@ class TriggerImporter(AutomationImporter):
                             "noMatchBefore": condition.get("noMatchBefore"),
                         }
                     )
+                case "UserInGroups" | "UserNotInGroups":
+                    field_obj = self._get_or_create_field(condition.get("field"))
+                    prepared_data["field"] = field_obj.id
+                    prepared_data["value"] = self._get_groups_ids(condition.get("value"))
+                case "CommentAuthorInGroups" | "CommentAuthorNotInGroups":
+                    # прежние версии экспорта выгружали это условие без групп: без них API триггер
+                    # не примет, и пусть в журнале будет понятная причина
+                    prepared_data["groups"] = self._get_groups_ids(get_required_field(condition, "groups"))
                 case "ContainsNoneOfStrings" | "FieldEqualsString" | "ContainsAnyOfStrings":
                     field_obj = self._get_or_create_field(condition.get("field"))
                     prepared_data.update(
@@ -274,6 +282,18 @@ class TriggerImporter(AutomationImporter):
 
             prepared_conditions.append(prepared_data)
         return prepared_conditions
+
+    def _get_groups_ids(self, groups: Optional[List[Any]]) -> List[Any]:
+        """Если группы в целевой организации нет, триггер не создаётся: с выпавшей группой
+        условие стало бы шире, чем было."""
+        groups_ids = []
+        for group in groups or []:
+            group_id = self._group_resolver.get_group_id(group)
+            if group_id is None:
+                raise GroupNotExistsError(group.get("display") if isinstance(group, dict) else group)
+            groups_ids.append(group_id)
+
+        return groups_ids
 
 
 class AutoactionImporter(AutomationImporter):

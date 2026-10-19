@@ -9,6 +9,7 @@ from yandex_tracker_client.objects import Resource
 from .base import CachedImporter
 from ..constants import ALL_PARTICIPANTS_GROUP_ID, DEFAULT_TRACKER_UI_URL
 from ..exceptions import GoalNotExistsError, ProjectNotExistsError
+from ..groups import GroupResolver
 from ..link_collectors import EntityLinksCollector
 from ..mapper import EntityMapper
 from ..text_normalizer import TextNormalizer
@@ -19,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 class EntityImporter(CachedImporter, ABC):
-    _group_name_to_id_map = dict()
-
     def __init__(
         self,
         client: TrackerClient,
@@ -34,8 +33,9 @@ class EntityImporter(CachedImporter, ABC):
         self._parent_entities = {}
         self._metric_items = {}
         self._entities_by_name = {}
-        if not self._group_name_to_id_map:
-            self._group_name_to_id_map = {group.name: group.id for group in self._client.groups}
+        self._group_resolver = GroupResolver(client, mapper)
+        # до создания сущностей: сбой позже оставил бы созданную сущность без прав
+        self._group_resolver.load_groups()
 
     @property
     @abstractmethod
@@ -180,11 +180,17 @@ class EntityImporter(CachedImporter, ABC):
             if not permissions_data["acl"].get(permission_type):
                 continue
 
-            groups_add = {
-                self._group_name_to_id_map.get(self._mapper.get_group(group))
-                for group in permissions_data["acl"][permission_type].get("groups", [])
-            }
-            groups_add = {g for g in groups_add if g is not None}
+            groups_add = set()
+            for group in permissions_data["acl"][permission_type].get("groups", []):
+                group_id = self._group_resolver.get_group_id(group)
+                if group_id is None:
+                    # доступ от пропущенной группы только сужается, но молча такое не проходит
+                    logger.warning(
+                        f"Group {group} is not found, it is skipped in permissions of {summary}: "
+                        "check mapping/groups.cfg"
+                    )
+                else:
+                    groups_add.add(group_id)
 
             permissions_update["acl"]["grant"][permission_type] = {
                 "users": [self._mapper.get_user(u) for u in permissions_data["acl"][permission_type].get("users", [])],
