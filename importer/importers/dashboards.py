@@ -89,7 +89,7 @@ class DashboardImporter(GetOrCreateImporter):
         """Своего ключа у дашборда нет и теги он не поддерживает, поэтому ранее созданный ищется
         по названию и владельцу. Если нашлось несколько, дашборд пропускается: создавать копию
         вслепую хуже, чем оставить перенос этого дашборда человеку."""
-        name = input_data["name"]
+        name = input_data.get("name")
         owner = self._mapper.get_user(input_data.get("owner"))
 
         # владелец в поиск не передаётся: если он не сопоставлен, Трекер отвечает ошибкой на весь
@@ -97,7 +97,7 @@ class DashboardImporter(GetOrCreateImporter):
         found = [
             dashboard
             for dashboard in self._dashboards.find(name=name)
-            if dashboard["name"] == name and self._has_owner(dashboard, owner)
+            if get_optional(dashboard, "name") == name and self._has_owner(dashboard, owner)
         ]
 
         if len(found) > 1:
@@ -127,7 +127,7 @@ class DashboardImporter(GetOrCreateImporter):
 
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "name": input_data["name"],
+            "name": input_data.get("name"),
             "layout": input_data.get("layout"),
             "owner": self._mapper.get_user(input_data.get("owner")),
         }
