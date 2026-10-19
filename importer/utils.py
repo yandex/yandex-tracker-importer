@@ -14,8 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def load_yaml_file(file_path: str) -> Any:
+    """Выгрузка читается безопасным загрузчиком: он строит только простые данные и не создаёт
+    объекты по служебным тегам вида `!!python/...` — выгрузке они не нужны."""
     with open(file_path, "r") as f:
-        return yaml.load(f, Loader=yaml.CLoader)
+        return yaml.load(f, Loader=yaml.CSafeLoader)
 
 
 def get_required_field(data: Dict[str, Any], field: str) -> Any:
