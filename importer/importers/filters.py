@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
@@ -10,12 +9,12 @@ from .base import CachedImporter
 from .fields import GlobalFieldImporter
 from ..exceptions import FilterNameConflictError, LocalFieldNotSupportedError
 from ..mapper import EntityMapper
+from ..state import ImportState
 from ..utils import prepare_field_value
 
 
 logger = logging.getLogger(__name__)
 
-STATE_DIR = "state"
 FILTERS_STATE_FILE = "filters.cfg"
 
 
@@ -36,43 +35,17 @@ class FilterImporter(CachedImporter):
     ):
         super().__init__(client, mapper)
         self._global_field_importer = global_field_importer
-        self._state_file = os.path.join(state_path, STATE_DIR, FILTERS_STATE_FILE)
-        self._imported_ids = self._load_state()
+        self._state = ImportState(state_path, FILTERS_STATE_FILE)
 
     @property
     def object_name(self) -> str:
         return "Filter"
 
-    def _load_state(self) -> Dict[str, str]:
-        if not os.path.exists(self._state_file):
-            return {}
-
-        imported_ids = {}
-        with open(self._state_file) as state:
-            for line in state:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                source_id, _, created_id = line.partition(":")
-                imported_ids[source_id.strip()] = created_id.strip()
-
-        return imported_ids
-
-    def _save_state(self, source_id: str, created_id: str) -> None:
-        os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
-        with open(self._state_file, "a") as state:
-            state.write(f"{source_id}:{created_id}\n")
-            state.flush()
-            os.fsync(state.fileno())
-
-        self._imported_ids[source_id] = created_id
-
     def _get_key(self, input_data: Dict[str, Any]) -> str:
         return str(input_data["id"])
 
     def _get_object(self, input_data: Dict[str, Any]) -> Optional[Resource]:
-        created_id = self._imported_ids.get(self._get_key(input_data))
+        created_id = self._state.get(self._get_key(input_data))
         if created_id is None:
             return None
 
@@ -87,7 +60,7 @@ class FilterImporter(CachedImporter):
             # найти его в целевой организации нечем — перечисления фильтров в API нет
             raise FilterNameConflictError(prepared_data["name"]) from None
 
-        self._save_state(source_id, str(created.id))
+        self._state.save(source_id, str(created.id))
 
         return created
 

@@ -1,7 +1,9 @@
 import logging
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
+from yandex_tracker_client.exceptions import NotFound, TrackerServerError
 from yandex_tracker_client.objects import Resource
 
 from .base import GetOrCreateImporter
@@ -14,6 +16,7 @@ from ..exceptions import (
     LocalFieldNotSupportedError,
 )
 from ..mapper import EntityMapper
+from ..state import ImportState
 from ..tracker_collections import get_dashboards, get_widgets
 from ..utils import get_optional, prepare_field_value
 
@@ -36,12 +39,29 @@ WIDGET_STATE_FIELDS = ("column", "row", "collapsed", "coords", "order")
 # Данные, которые проставляет сам Трекер
 WIDGET_SERVICE_FIELDS = ("id", "createdAt", "createdBy", "self", "version", "dashboard")
 
+DASHBOARDS_STATE_FILE = "dashboards.cfg"
+
+# Ответы на поиск дашбордов на установках, где его нет
+SEARCH_UNAVAILABLE_STATUSES = (404, 405)
+
+# Длина начала слова в запросе поиска дашбордов; иероглиф и хирагана берутся по одному символу
+SEARCH_PREFIX_LENGTH = 15
+SINGLE_CHARACTER_WORDS = ("CJK UNIFIED IDEOGRAPH", "HIRAGANA")
+
+
+def _is_word_char(char: str) -> bool:
+    # буквы, цифры, диакритика (например, огласовки деванагари)
+    return unicodedata.category(char)[0] in "LNM"
+
 
 class DashboardImporter(GetOrCreateImporter):
     """Переносит дашборды вместе с виджетами.
 
     Создание идёт в три шага: дашборд, затем виджеты по одному — при создании виджет положения не
-    принимает, — и в конце одно обновление дашборда, которое раскладывает виджеты по местам."""
+    принимает, — и в конце одно обновление дашборда, которое раскладывает виджеты по местам.
+
+    Созданные дашборды записываются в `state/dashboards.cfg`: по нему они находятся при
+    повторном прогоне, в том числе на установках без поиска дашбордов."""
 
     def __init__(
         self,
@@ -49,6 +69,7 @@ class DashboardImporter(GetOrCreateImporter):
         mapper: EntityMapper,
         global_field_importer: GlobalFieldImporter,
         filter_importer: FilterImporter,
+        state_path: str,
         ui_url: str = DEFAULT_TRACKER_UI_URL,
     ):
         super().__init__(client, mapper)
@@ -58,6 +79,8 @@ class DashboardImporter(GetOrCreateImporter):
         self._filter_importer = filter_importer
         self._dashboards = get_dashboards(client)
         self._widgets = get_widgets(client)
+        self._state = ImportState(state_path, DASHBOARDS_STATE_FILE)
+        self._search_available = True
 
     @property
     def object_name(self) -> str:
@@ -70,35 +93,95 @@ class DashboardImporter(GetOrCreateImporter):
         return self._widget_urls
 
     def get_or_create(self, input_data: Dict[str, Any]) -> Optional[Resource]:
+        source_id = input_data.get("id")
         try:
-            dashboard_obj = self._find_dashboard(input_data)
+            dashboard_obj = self._find_imported(input_data) or self._find_dashboard(input_data)
         except Exception:
             # не зная, создан ли дашборд раньше, создавать его нельзя: получится дубль
             logger.exception(f"Error searching dashboard {input_data.get('name')}, it is skipped")
+            return None
+
+        if dashboard_obj is None and source_id is None and not self._search_available:
+            # без id дашборд не записать в файл, без поиска его не найти при повторном прогоне
+            logger.error(
+                f"Dashboard {input_data.get('name')} has no id in the dump and dashboard search is not "
+                "available, it is skipped"
+            )
             return None
 
         if dashboard_obj is None:
             dashboard_obj = self._try_creating_object(input_data)
 
         if dashboard_obj is not None:
+            # запись до создания виджетов: если прогон прервётся на виджетах, следующий найдёт
+            # дашборд по файлу
+            if source_id is not None and self._state.get(str(source_id)) != str(dashboard_obj.id):
+                self._state.save(str(source_id), str(dashboard_obj.id))
             self._import_widgets(input_data.get("widgets") or [], dashboard_obj)
 
         return dashboard_obj
 
+    def _find_imported(self, input_data: Dict[str, Any]) -> Optional[Resource]:
+        """Дашборд из `state/dashboards.cfg`. Удалённый (404) создаётся заново.
+
+        Название и владелец сверяются с выгрузкой: каталог `state` общий для рабочего каталога, и
+        запись могла остаться от другой выгрузки."""
+        source_id = input_data.get("id")
+        created_id = self._state.get(str(source_id)) if source_id is not None else None
+        if created_id is None:
+            return None
+
+        try:
+            dashboard_obj = self._dashboards.get(created_id)
+        except NotFound:
+            return None
+        except Exception:
+            logger.warning(
+                f"Dashboard {created_id} recorded in state/dashboards.cfg for dashboard {source_id} "
+                "of the dump can not be read"
+            )
+            raise
+
+        name = input_data.get("name")
+        owner = self._mapper.get_user(input_data.get("owner"))
+        if get_optional(dashboard_obj, "name") != name or not self._has_owner(dashboard_obj, owner):
+            logger.warning(
+                f"Dashboard {created_id} recorded in state/dashboards.cfg for dashboard {source_id} "
+                f"of the dump is not {name} of {owner}, it is not reused"
+            )
+            return None
+
+        return dashboard_obj
+
     def _find_dashboard(self, input_data: Dict[str, Any]) -> Optional[Resource]:
-        """Своего ключа у дашборда нет и теги он не поддерживает, поэтому ранее созданный ищется
-        по названию и владельцу. Если нашлось несколько, дашборд пропускается: создавать копию
-        вслепую хуже, чем оставить перенос этого дашборда человеку."""
+        """Поиск дашборда по названию и владельцу: своего ключа и тегов у дашборда нет. Если
+        нашлось несколько, дашборд пропускается: какой из них обновлять, определить нельзя."""
+        if not self._search_available:
+            return None
+
         name = input_data.get("name")
         owner = self._mapper.get_user(input_data.get("owner"))
 
-        # владелец в поиск не передаётся: если он не сопоставлен, Трекер отвечает ошибкой на весь
-        # запрос, поэтому найденное сверяется с владельцем уже на своей стороне
-        found = [
-            dashboard
-            for dashboard in self._dashboards.find(name=name)
-            if get_optional(dashboard, "name") == name and self._has_owner(dashboard, owner)
-        ]
+        # отсутствие поиска определяется по первому запросу; ошибка на следующих страницах — сбой,
+        # дашборд пропускается
+        try:
+            pages = iter(self._dashboards.find(name=self._search_query(name)))
+            first = next(pages, None)
+        except TrackerServerError as error:
+            if error.status_code not in SEARCH_UNAVAILABLE_STATUSES:
+                raise
+            self._search_available = False
+            logger.warning(
+                "Dashboard search is not available in this Tracker installation: dashboards created "
+                "by earlier runs are found only by state/dashboards.cfg, keep it between runs"
+            )
+            return None
+
+        candidates = ([first] if first is not None else []) + list(pages)
+        found = self._select_dashboards(candidates, name, owner)
+        if not found and self._search_query(name) != name:
+            # повтор по полному названию, как искалось раньше
+            found = self._select_dashboards(self._dashboards.find(name=name), name, owner)
 
         if len(found) > 1:
             raise DashboardNotUniqueError(name, len(found))
@@ -109,6 +192,43 @@ class DashboardImporter(GetOrCreateImporter):
         # поиск отдаёт списочное представление без виджетов, а они нужны, чтобы понять, какие из
         # них уже созданы; заодно берётся свежая версия дашборда для последующего обновления
         return self._dashboards.get(found[0]["id"])
+
+    def _select_dashboards(self, candidates: Any, name: Optional[str], owner: Optional[str]) -> List[Any]:
+        # владелец в поиск не передаётся: если он не сопоставлен, Трекер отвечает ошибкой на весь
+        # запрос, поэтому найденное сверяется с владельцем уже на своей стороне
+        return [
+            dashboard
+            for dashboard in candidates
+            if get_optional(dashboard, "name") == name and self._has_owner(dashboard, owner)
+        ]
+
+    @staticmethod
+    def _search_query(name: Optional[str]) -> Optional[str]:
+        """Запрос для поиска дашбордов: начала слов названия. По полному названию со знаками
+        препинания или длинными словами поиск дашборд не находит.
+
+        Из каждой части между пробелами берётся первая последовательность букв, цифр и
+        диакритики, до 15 символов; из иероглифа и хираганы — один символ. Точное название
+        проверяется после поиска."""
+        if not name:
+            return name
+
+        words = []
+        for part in name.split():
+            start = next((i for i, char in enumerate(part) if _is_word_char(char)), None)
+            if start is None:
+                continue
+
+            end = start
+            while end < len(part) and _is_word_char(part[end]):
+                end += 1
+
+            if unicodedata.name(part[start], "").startswith(SINGLE_CHARACTER_WORDS):
+                words.append(part[start])
+            else:
+                words.append(part[start:end][:SEARCH_PREFIX_LENGTH])
+
+        return " ".join(words) or name
 
     @staticmethod
     def _has_owner(dashboard: Any, owner: Optional[str]) -> bool:

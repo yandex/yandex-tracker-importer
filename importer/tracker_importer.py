@@ -90,7 +90,7 @@ class TrackerImporter:
             client, mapper, self._global_field_importer, self._state_path
         )
         self._dashboard_importer = DashboardImporter(
-            client, mapper, self._global_field_importer, self._filter_importer, ui_url
+            client, mapper, self._global_field_importer, self._filter_importer, self._state_path, ui_url
         )
 
         self._trigger_importers = {}

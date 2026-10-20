@@ -74,6 +74,7 @@
   "importer/importers/queue_objects.py":"tracker/scripts/trackin/importer/importers/queue_objects.py",
   "importer/link_collectors.py":"tracker/scripts/trackin/importer/link_collectors.py",
   "importer/mapper.py":"tracker/scripts/trackin/importer/mapper.py",
+  "importer/state.py":"tracker/scripts/trackin/importer/state.py",
   "importer/text_normalizer.py":"tracker/scripts/trackin/importer/text_normalizer.py",
   "importer/tracker_collections.py":"tracker/scripts/trackin/importer/tracker_collections.py",
   "importer/tracker_importer.py":"tracker/scripts/trackin/importer/tracker_importer.py",
