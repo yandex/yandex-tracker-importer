@@ -77,6 +77,16 @@ class Widgets(Collection):
         )
 
 
+def run_version_action(client: TrackerClient, version_id: Any, action: str):
+    """Выпуск и архивирование версии — отдельные методы API без тела запроса: `_release`,
+    `_archive`."""
+    versions = client.versions
+    return versions._execute_request(
+        versions._connection.post,
+        path=f"/{{api_version}}/versions/{version_id}/{action}",
+    )
+
+
 def get_dashboards(client: TrackerClient) -> Dashboards:
     return client._get_collection(Dashboards)
 

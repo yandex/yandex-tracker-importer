@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Dict, List, Optional
+from contextlib import ExitStack
+from typing import Any, Callable, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
@@ -73,6 +74,9 @@ class AutomationImporter(CachedImporter):
         self._component_importer = component_importer
         self._version_importer = version_importer
         self._project_importer = project_importer
+        # поля, в которые пишет создаваемая автоматизация: на время её создания с них снимается
+        # запрет редактирования
+        self._written_fields = {}
 
     def _get_key(self, input_data: Dict[str, Any]) -> Optional[str]:
         if "name" not in input_data:
@@ -152,6 +156,7 @@ class AutomationImporter(CachedImporter):
         prepared = {}
         for field_key, value in field_templates.items():
             field_obj = self._get_or_create_field(field_key)
+            self._add_written_field(field_obj, checked_for_local=False)
             if field_obj.key == "project" and self._is_project_target_update(value):
                 # {"primary": 65, "secondary": [57]}: номера проектов переводятся в номера целевой организации
                 prepared[field_obj.id] = {
@@ -184,6 +189,30 @@ class AutomationImporter(CachedImporter):
             return False
         return active
 
+    def _try_creating_object(self, input_data: Dict[str, Any]) -> Optional[Resource]:
+        self._written_fields = {}
+        return super()._try_creating_object(input_data)
+
+    def _add_written_field(self, field_obj: Resource, checked_for_local: bool) -> None:
+        """Запрет редактирования API проверяет у глобального поля во всех действиях, которые в него
+        пишут, а у локального — только в «Вычислить по формуле»."""
+        if checked_for_local or not self._is_local_field(field_obj):
+            self._written_fields[field_obj.id] = field_obj
+
+    @staticmethod
+    def _is_local_field(field_obj: Resource) -> bool:
+        return "--" in str(field_obj.id)
+
+    def _create_with_writable_fields(self, prepared_data: Dict[str, Any], create: Callable[[], Resource]) -> Resource:
+        """Создаёт автоматизацию, сняв запрет редактирования с полей, в которые она пишет, и сразу
+        возвращает запрет: поле с запретом API в таких действиях не принимает."""
+        purpose = f"creating {self.object_name} {prepared_data.get('name')} of queue {self._queue_obj.key}"
+        with ExitStack() as stack:
+            for field_obj in self._written_fields.values():
+                importer = self._local_field_importer if self._is_local_field(field_obj) else self._global_field_importer
+                stack.enter_context(importer.writable(field_obj, purpose))
+            return create()
+
     def _get_or_create_field(self, field_key: str) -> Resource:
         if field_key.startswith("local_"):
             return self._local_field_importer.get_local_field(field_key)
@@ -201,11 +230,14 @@ class AutomationImporter(CachedImporter):
                     prepared_data["status"] = self._mapper.get_status(action_data.get("status"))
                 case "CalculateFormula":
                     prepared_data["formula"] = action_data.get("formula")
-                    prepared_data["resultField"] = self._get_or_create_field(action_data.get("resultField")).id
+                    field_obj = self._get_or_create_field(action_data.get("resultField"))
+                    self._add_written_field(field_obj, checked_for_local=True)
+                    prepared_data["resultField"] = field_obj.id
                 case "Update":
                     prepared_data["update"] = {}
                     for field_key, update in action_data.get("update", {}).items():
                         field_obj = self._get_or_create_field(field_key)
+                        self._add_written_field(field_obj, checked_for_local=False)
                         prepared_data["update"][field_obj.id] = self._prepare_field_update(field_obj, update)
                 case "Move":
                     prepared_data["queue"] = self._mapper.get_queue(action_data.get("queue"))
@@ -279,6 +311,7 @@ class MacrosImporter(AutomationImporter):
         issue_update_data = {}
         for field_key, update in input_data.get("issueUpdate", {}).items():
             field_obj = self._get_or_create_field(field_key)
+            self._add_written_field(field_obj, checked_for_local=False)
             issue_update_data[field_obj.key] = self._prepare_field_update(field_obj, update)
 
         return {
@@ -288,7 +321,9 @@ class MacrosImporter(AutomationImporter):
         }
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
-        return self._queue_obj.collection.macros.create(**prepared_data)
+        return self._create_with_writable_fields(
+            prepared_data, lambda: self._queue_obj.collection.macros.create(**prepared_data)
+        )
 
 
 class TriggerImporter(AutomationImporter):
@@ -312,7 +347,9 @@ class TriggerImporter(AutomationImporter):
         }
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
-        return self._queue_obj.collection.triggers.create(**prepared_data)
+        return self._create_with_writable_fields(
+            prepared_data, lambda: self._queue_obj.collection.triggers.create(**prepared_data)
+        )
 
     def _prepare_conditions_data(self, conditions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         prepared_conditions = []
@@ -506,7 +543,9 @@ class AutoactionImporter(AutomationImporter):
         return prepared_data
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
-        return self._queue_obj.collection.autoactions.create(**prepared_data)
+        return self._create_with_writable_fields(
+            prepared_data, lambda: self._queue_obj.collection.autoactions.create(**prepared_data)
+        )
 
     def _prepare_filter_data(self, filter_data: Dict[str, Any]):
         prepared_filter_data = {}

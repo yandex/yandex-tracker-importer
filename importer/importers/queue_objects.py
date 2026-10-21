@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
@@ -12,7 +13,8 @@ from ..exceptions import (
 )
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
-from ..utils import clean_empty
+from ..tracker_collections import run_version_action
+from ..utils import clean_empty, get_optional
 
 
 logger = logging.getLogger(__name__)
@@ -276,16 +278,70 @@ class VersionImporter(CachedImporter):
         return version_obj
 
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Дата выпуска при создании сразу делает версию выпущенной с этой датой."""
+        release_date = input_data.get("releasedAt") if input_data.get("released") else None
+        if release_date is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(release_date)):
+            # дата не в виде YYYY-MM-DD: версия выпускается в конце импорта датой прогона
+            logger.warning(f"Release date {release_date} of version {input_data['name']} is not YYYY-MM-DD, it is skipped")
+            release_date = None
         return clean_empty({
             "queue": self._queue_obj.key,
             "name": input_data["name"],
             "description": input_data.get("description"),
             "startDate": input_data.get("startDate"),
             "dueDate": input_data.get("dueDate"),
+            "releaseDate": f"{release_date}T00:00:00.000+0000" if release_date else None,
         })
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
         return self._client.versions.create(**prepared_data)
+
+    def update_settings(self, input_data: Dict[str, Any]) -> None:
+        """Следующая версия, выпуск и архив задаются, когда созданы все версии очереди: следующая
+        версия может идти в выгрузке позже. Следующая версия указывается номером: одноимённые
+        версии бывают в разных очередях. Версия, созданная без даты выпуска, выпускается датой
+        прогона.
+
+        Архивирование убирает версию у задач без резолюции. Поэтому версия, у которой в целевой
+        организации уже есть такие задачи (их создал прежний прогон), не архивируется."""
+        version_obj = self.get_from_cache(f"{self._queue_obj.key}-{input_data.get('name')}")
+        if version_obj is None:
+            logger.error(f"Version {input_data.get('name')} of queue {self._queue_obj.key} does not exist")
+            return
+        steps = []
+        next_obj = self.get_from_cache(f"{self._queue_obj.key}-{input_data['next']}") if input_data.get("next") else None
+        if input_data.get("next") and next_obj is None:
+            logger.error(f"Next version {input_data['next']} of version {input_data['name']} does not exist")
+        elif next_obj is not None:
+            current_next = get_optional(version_obj.next, "id") if version_obj.next else None
+            if str(current_next) != str(next_obj.id):
+                steps.append(("next", lambda: version_obj.update(next=next_obj.id)))
+        elif "next" in input_data and version_obj.next:
+            # следующую версию убрали в источнике; в выгрузке прежней версии ключа нет. Значение null
+            # API принимает, но связь не снимает
+            steps.append(("next", lambda: version_obj.update(next={"unset": True})))
+        if input_data.get("released") and not version_obj.released:
+            steps.append(("release", lambda: run_version_action(self._client, version_obj.id, "_release")))
+        if input_data.get("archived") and not version_obj.archived:
+            unresolved = self._client.issues.find(
+                filter={"queue": self._queue_obj.key, "fixVersions": version_obj.id, "resolution": "empty()"},
+                count_only=True,
+            )
+            if unresolved:
+                logger.warning(
+                    f"Version {input_data['name']} of queue {self._queue_obj.key} is not archived: archiving "
+                    f"removes it from {unresolved} unresolved issues, archive it manually"
+                )
+            else:
+                steps.append(("archive", lambda: run_version_action(self._client, version_obj.id, "_archive")))
+
+        for step, run in steps:
+            try:
+                run()
+            except Exception:
+                logger.exception(
+                    f"Error setting {step} of version {input_data['name']} of queue {self._queue_obj.key}"
+                )
 
     def _get_key(self, input_data: Dict[str, Any]) -> Optional[str]:
         if "name" not in input_data:

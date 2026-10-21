@@ -1,5 +1,6 @@
 import logging
 from abc import ABC
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 from yandex_tracker_client import TrackerClient
@@ -11,7 +12,7 @@ from ..exceptions import (
     GlobalFieldNotCreatedError
 )
 from ..mapper import EntityMapper
-from ..utils import clean_empty, load_yaml_file
+from ..utils import clean_empty, get_optional, load_yaml_file
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,36 @@ class FieldImporter(CachedImporter, ABC):
             "container": input_data["schema"]["type"] == "array",
             "optionsProvider": input_data.get("optionsProvider"),
             "description": input_data.get("description"),
+            "readonly": input_data.get("readonly"),
+            "hidden": input_data.get("hidden"),
         })
+
+    @contextmanager
+    def writable(self, field_obj: Resource, purpose: str):
+        """Снимает запрет редактирования на время одной операции и сразу возвращает его.
+
+        Поле с запретом API не принимает в действии «Вычислить по формуле», а глобальное поле —
+        ещё и в действиях «Изменить значения полей» и «Создать задачу» и в макросе. Запрет снимается только у поля,
+        которое его сейчас имеет, и возвращается, даже если операция завершилась ошибкой."""
+        if not self._is_readonly(field_obj):
+            yield
+            return
+
+        logger.info(f"Field {field_obj.id} is made editable while {purpose}")
+        self._set_readonly(field_obj, False)
+        try:
+            yield
+        finally:
+            try:
+                self._set_readonly(field_obj, True)
+            except Exception:
+                logger.exception(f"Error restoring readonly of field {field_obj.id}, set it manually")
+
+    def _is_readonly(self, field_obj: Resource) -> bool:
+        return bool(get_optional(field_obj, "readonly"))
+
+    def _set_readonly(self, field_obj: Resource, readonly: bool) -> None:
+        raise NotImplementedError
 
     def _get_field_type(self, data: Dict[str, Any]) -> str:
         if data["schema"]["type"] == "array":
@@ -125,6 +155,10 @@ class LocalFieldImporter(FieldImporter):
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
         return self._queue_obj.collection.local_fields.create(**prepared_data)
 
+    def _set_readonly(self, field_obj: Resource, readonly: bool) -> None:
+        # локальное поле изменяется по ключу в очереди
+        self._queue_obj.collection.local_fields.update_field(field_obj.key, readonly=readonly)
+
     def _get_key(self, input_data: Dict[str, Any]) -> Optional[str]:
         if "key" not in input_data:
             logger.error(
@@ -153,6 +187,10 @@ class GlobalFieldImporter(FieldImporter, GlobalObjectImporter):
     @property
     def object_name(self) -> str:
         return "GlobalField"
+
+    def _set_readonly(self, field_obj: Resource, readonly: bool) -> None:
+        # изменение глобального поля требует его текущей версии
+        self._client.fields.get(field_obj.id).update(readonly=readonly)
 
     @property
     def _filename(self) -> str:

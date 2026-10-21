@@ -8,7 +8,7 @@ from yandex_tracker_client.objects import Resource
 
 from .constants import DEFAULT_TRACKER_UI_URL
 from .mapper import EntityMapper
-from .utils import get_required_field, load_yaml_file
+from .utils import get_optional, get_required_field, load_yaml_file
 from .importers.global_objects import (
     StatusImporter,
     IssueTypeImporter,
@@ -328,6 +328,14 @@ class TrackerImporter:
                     self._mapper.get_queue(queue_data["key"]),
                     version_data
                 )
+        # следующая версия, выпуск и архив — когда созданы все версии очереди, но до задач:
+        # архивирование убирает версию у задач без резолюции, а в архивную версию задача
+        # импортируется
+        for version_data in queue_data.get("versions", []):
+            try:
+                version_importer.update_settings(version_data)
+            except Exception:
+                logger.exception(f"Error updating version {version_data} of queue {queue_data.get('key')}")
 
     def _import_issues_with_threads(self, queue_data_path: str, issue_importer: IssueImporter) -> None:
         issue_dirs = [
@@ -369,6 +377,7 @@ class TrackerImporter:
         self._import_entity(portfolios_path, self._portfolio_importer, self._progress_tracker.report_portfolio)
 
         self._update_parents_entities()
+        self._update_permission_sources()
 
     def _import_entity(self, entity_path: str, importer: EntityImporter, entity_progress_callback: Callable) -> None:
         if os.path.exists(entity_path):
@@ -418,6 +427,51 @@ class TrackerImporter:
                     child_obj.update(fields=update_data)
                 except Exception:
                     logger.exception(f"Error updating parent for entity {child_id}")
+
+    def _update_permission_sources(self) -> None:
+        """Наследование доступа приводится к выгрузке: недостающие источники добавляются, лишние
+        снимаются. Если какой-то источник в целевой организации не найден, лишние не снимаются —
+        среди них может оказаться его же копия."""
+        importers_by_type = {
+            "project": self._project_importer,
+            "goal": self._goal_importer,
+            "portfolio": self._portfolio_importer,
+        }
+        for importer in importers_by_type.values():
+            for entity_id, sources in importer.permission_sources.items():
+                entity_obj = importer.get_from_cache(entity_id)
+                if entity_obj is None:
+                    continue
+
+                wanted, all_found = [], isinstance(sources, list)
+                for source in sources if isinstance(sources, list) else []:
+                    source_importer = importers_by_type.get(source.get("type")) if isinstance(source, dict) else None
+                    source_obj = source_importer.get_from_cache(str(source.get("id"))) if source_importer else None
+                    if source_obj is None:
+                        logger.error(
+                            f"Permission source {source} of {importer.object_name} {entity_id} does not exist"
+                        )
+                        all_found = False
+                    elif source_obj.id not in wanted:
+                        wanted.append(source_obj.id)
+
+                try:
+                    entity = importer.objects[entity_obj.id]
+                    current = [
+                        get_optional(source, "id")
+                        for source in entity.extended_permissions.get("permissionSources") or []
+                    ]
+                    to_add = [source_id for source_id in wanted if source_id not in current]
+                    to_remove = [source_id for source_id in current if source_id not in wanted] if all_found else []
+                    # Источником API принимает только прямого родителя сущности. Если добавить не
+                    # удалось, текущие источники не снимаются: иначе сущность осталась бы совсем без
+                    # наследования
+                    if to_add:
+                        entity.update_extended_permissions({"permissionSources": {"add": to_add}})
+                    if to_remove:
+                        entity.update_extended_permissions({"permissionSources": {"remove": to_remove}})
+                except Exception:
+                    logger.exception(f"Error updating permission sources of {importer.object_name} {entity_id}")
 
     def _import_entity_links_with_threads(self) -> None:
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:

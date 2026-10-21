@@ -31,6 +31,7 @@ class EntityImporter(CachedImporter, ABC):
         self._entity_links_collector = entity_links_collector
         self._ui_url = ui_url
         self._parent_entities = {}
+        self._permission_sources = {}
         self._metric_items = {}
         self._entities_by_name = {}
         self._group_resolver = GroupResolver(client, mapper)
@@ -52,12 +53,30 @@ class EntityImporter(CachedImporter, ABC):
         return self._parent_entities
 
     @property
+    def permission_sources(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Сущности, от которых наследуется доступ: `[{"type": "goal", "id": "12"}]`. Собираются и
+        для созданных прежним прогоном сущностей — наследование проставляется после создания всех
+        сущностей и приводится к выгрузке при каждом прогоне."""
+        return self._permission_sources
+
+    @property
     def metric_items(self) -> Dict[str, Any]:
         """Метрики ссылаются на виджеты дашбордов, а дашборды импортируются после сущностей,
         поэтому метрики проставляются отдельным проходом."""
         return self._metric_items
 
     def get_or_create(self, input_data: Dict[str, Any], attachments_path: str) -> Optional[Resource]:
+        permissions = input_data.get("permissions") or {}
+        sources = permissions.get("permissionSources")
+        if isinstance(sources, list) and self._get_key(input_data) is not None:
+            self._permission_sources[self._get_key(input_data)] = sources
+        elif "permissionSources" in permissions:
+            # не список — источники не разобрать, и снимать текущие нельзя
+            logger.error(
+                f"permissionSources of {self.object_name} {input_data.get('id')} is not a list, inheritance is not changed"
+            )
+        # без ключа (выгрузка прежней версии) наследование не трогается
+
         entity_obj = self._try_getting_object(input_data)
         if entity_obj is not None:
             self._cache_entity(input_data, entity_obj)
