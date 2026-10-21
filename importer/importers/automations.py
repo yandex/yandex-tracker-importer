@@ -8,13 +8,50 @@ from .base import CachedImporter
 from .entities import ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
-from ..exceptions import GroupNotExistsError, MissingFieldError
+from ..exceptions import (
+    FieldTemplatesNotSupportedError,
+    GroupNotExistsError,
+    MissingFieldError,
+    UnsupportedActionError,
+)
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
 from ..utils import get_required_field, prepare_checklist_item_data, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
+
+
+def is_reference(value: Any) -> bool:
+    """Ссылка на объект, а не набор операций: `{"id": 30, "display": "Проект"}`."""
+    return isinstance(value, dict) and "id" in value and set(value) <= {"id", "display", "self", "key"}
+
+
+LINKED_ISSUE_CONDITIONS = {"AllLinkedIssueCondition", "AnyLinkedIssueCondition", "NoneLinkedIssueCondition"}
+
+
+def iterate_conditions(conditions: List[Dict[str, Any]]):
+    for condition in conditions:
+        yield condition
+        yield from iterate_conditions(condition.get("conditions") or [])
+
+
+def has_masked_value(value: Any) -> bool:
+    """Пароль или токен, скрытый в выгрузке: `********` или вложенный объект с таким значением."""
+    if isinstance(value, dict):
+        return any(has_masked_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(has_masked_value(item) for item in value)
+    return isinstance(value, str) and len(value) >= 3 and set(value) == {"*"}
+
+
+def project_id(value: Any) -> Any:
+    return value.get("id") if isinstance(value, dict) else value
+
+
+def user_key(user: Any) -> Any:
+    """Прежние версии экспорта записывали пользователя в части условий ссылкой с именем."""
+    return user.get("display") if isinstance(user, dict) else user
 
 
 class AutomationImporter(CachedImporter):
@@ -53,14 +90,41 @@ class AutomationImporter(CachedImporter):
             return None
 
         update_data = {}
+        any_update = {}
         for operation, value in update.items():
-            if field_obj.key == "project":
-                update_data.update(
-                    {"set": {"any": {operation: self._prepare_field_value(field_obj, value)}}}
-                )  # Handling special structure for project updates
+            if field_obj.key == "project" and self._is_project_target_update(value):
+                # операция над основным или дополнительными проектами: {"set": {"primary": {"set": 30}}}
+                update_data[operation] = {
+                    target: self._prepare_project_operations(field_obj, operations)
+                    for target, operations in value.items()
+                }
+            elif field_obj.key == "project":
+                # операции над набором проектов собираются в одно обновление {"set": {"any": ...}}
+                any_update[operation] = self._prepare_field_value(field_obj, value)
             else:
                 update_data[operation] = self._prepare_field_value(field_obj, value)
+
+        if any_update:
+            update_data["set"] = {"any": any_update}
         return update_data
+
+    @staticmethod
+    def _is_project_target_update(value: Any) -> bool:
+        return isinstance(value, dict) and bool(value) and set(value) <= {"primary", "secondary", "any"}
+
+    def _prepare_project_operations(self, field_obj: Resource, operations: Any) -> Any:
+        """Номера проектов исходной организации переводятся в номера целевой. Номер может быть
+        записан ссылкой `{"id": 30}` — так обновление проектов записывали прежние версии экспорта."""
+        if not isinstance(operations, dict) or is_reference(operations):
+            # короткая форма без операции: {"primary": 30} или {"primary": {"id": 30}}
+            value = project_id(operations)
+            return None if value is None else self._prepare_field_value(field_obj, value)
+
+        prepared = {}
+        for operation, value in operations.items():
+            ids = [project_id(item) for item in value] if isinstance(value, list) else project_id(value)
+            prepared[operation] = None if ids is None else self._prepare_field_value(field_obj, ids)
+        return prepared
 
     def _prepare_field_value(self, field_obj: Resource, value: Any) -> Any:
         return prepare_field_value(
@@ -71,6 +135,54 @@ class AutomationImporter(CachedImporter):
             component_importer=self._component_importer,
             version_importer=self._version_importer,
         )
+
+    def _prepare_field_templates(self, action_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Шаблон полей задачи, которую создаёт действие. Компоненты, версии и локальные поля
+        сопоставляются в очереди, которую импортируют сейчас, поэтому для задачи в другой очереди
+        такие поля не переносятся: триггер не создаётся."""
+        field_templates = action_data.get("fieldTemplates") or {}
+        target_queue = action_data.get("queue")
+        queue_bound = [
+            key for key in field_templates
+            if key.startswith("local_") or key in ("components", "fixVersions", "affectedVersions")
+        ]
+        if queue_bound and self._mapper.get_queue(target_queue) != self._queue_obj.key:
+            raise FieldTemplatesNotSupportedError(target_queue, queue_bound)
+
+        prepared = {}
+        for field_key, value in field_templates.items():
+            field_obj = self._get_or_create_field(field_key)
+            if field_obj.key == "project" and self._is_project_target_update(value):
+                # {"primary": 65, "secondary": [57]}: номера проектов переводятся в номера целевой организации
+                prepared[field_obj.id] = {
+                    target: None if ids is None else self._prepare_field_value(field_obj, ids)
+                    for target, ids in value.items()
+                }
+            else:
+                prepared[field_obj.id] = self._prepare_field_value(field_obj, value)
+        return prepared
+
+    def _get_active(self, input_data: Dict[str, Any]) -> Optional[bool]:
+        """Автоматизация, которая после переноса работала бы иначе, создаётся неактивной: условие
+        на связанные задачи переносится без фильтра по ним, а у вебхука скрыты значения
+        переменных, секреты, пароли и токены."""
+        active = input_data.get("active")
+        reasons = []
+        if any(
+            condition.get("type", "").removesuffix("Proto") in LINKED_ISSUE_CONDITIONS
+            for condition in iterate_conditions(input_data.get("conditions") or [])
+        ):
+            reasons.append("the filter on linked issues is not transferred")
+        if any(
+            action.get("type") == "Webhook"
+            and (action.get("variables") or action.get("secrets") or has_masked_value(action.get("authContext")))
+            for action in input_data.get("actions") or []
+        ):
+            reasons.append("webhook secrets are masked in the dump, set them manually")
+        if active and reasons:
+            logger.warning(f"{self.object_name} {input_data.get('name')} is created inactive: {'; '.join(reasons)}")
+            return False
+        return active
 
     def _get_or_create_field(self, field_key: str) -> Resource:
         if field_key.startswith("local_"):
@@ -100,9 +212,20 @@ class AutomationImporter(CachedImporter):
                 case "CreateComment":
                     prepared_data["text"] = action_data.get("text")
                     prepared_data["fromRobot"] = action_data.get("fromRobot")
+                    if action_data.get("summonees"):
+                        prepared_data["summonees"] = [self._mapper.get_user(user) for user in action_data["summonees"]]
+                    if action_data.get("summoneesFields"):
+                        # поля, из которых берутся призываемые: автор, исполнитель, локальное поле очереди
+                        prepared_data["summoneesFields"] = [
+                            self._get_or_create_field(field_key).id for field_key in action_data["summoneesFields"]
+                        ]
+                    if action_data.get("email"):
+                        # отправитель должен быть подключён к очереди в целевой организации
+                        prepared_data["email"] = action_data["email"]
                 case "CreateChecklist":
+                    # прежние версии экспорта записывали отметку пункта как done
                     prepared_data["checklistItems"] = [
-                        prepare_checklist_item_data(item, self._mapper)
+                        prepare_checklist_item_data({"checked": item.get("done"), **item}, self._mapper)
                         for item in action_data.get("checklistItems", [])
                     ]
                 case "Webhook":
@@ -116,6 +239,11 @@ class AutomationImporter(CachedImporter):
                             "body": action_data.get("body"),
                         }
                     )
+                    if action_data.get("retryConfig"):
+                        prepared_data["retryConfig"] = action_data["retryConfig"]
+                    if action_data.get("variables"):
+                        # значения переменных в выгрузке скрыты, имена сохраняются
+                        prepared_data["variables"] = action_data["variables"]
                 case "CreateIssue":
                     prepared_data.update(
                         {
@@ -123,19 +251,15 @@ class AutomationImporter(CachedImporter):
                             "summary": action_data.get("summary"),
                             "linkWithInitialIssue": action_data.get("linkWithInitialIssue"),
                             "fromRobot": action_data.get("fromRobot", False),
+                            "fieldTemplates": self._prepare_field_templates(action_data),
                         }
                     )
-
-                    field_templates = action_data.get("fieldTemplates", {})
-                    prepared_data["fieldTemplates"] = {
-                        "followers": [self._mapper.get_user(u) for u in field_templates.get("followers", [])],
-                        "assignee": self._mapper.get_user(field_templates.get("assignee")),
-                        "description": field_templates.get("description"),
-                        "dueDate": field_templates.get("dueDate"),
-                        "priority": self._mapper.get_priority(field_templates.get("priority")),
-                        "type": self._mapper.get_issue_type(field_templates.get("type")),
-                        "tags": field_templates.get("tags", []),
-                    }
+                    for key in ("notify", "notifyAuthor"):
+                        if key in action_data:
+                            prepared_data[key] = action_data[key]
+                case "Duty":
+                    # действие ссылается на сервис и график дежурств исходной организации
+                    raise UnsupportedActionError(action_type)
 
             prepared_actions.append(prepared_data)
         return prepared_actions
@@ -183,7 +307,8 @@ class TriggerImporter(AutomationImporter):
             "name": input_data["name"],
             "actions": self._prepare_actions_data(input_data["actions"]),
             "conditions": self._prepare_conditions_data(input_data.get("conditions", [])),
-            "active": input_data.get("active"),
+            "active": self._get_active(input_data),
+            **{key: input_data[key] for key in ("description", "skipFailures") if input_data.get(key) is not None},
         }
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
@@ -198,13 +323,21 @@ class TriggerImporter(AutomationImporter):
             match cond_type:
                 case "Or" | "And":
                     prepared_data["conditions"] = self._prepare_conditions_data(condition["conditions"])
-                case (
-                    "CommentNoneMatchCondition"
-                    | "CommentStringNotMatchCondition"
-                    | "CommentFullyMatchCondition"
-                    | "CommentAnyMatchCondition"
-                    | "CommentStringMatchCondition"
-                ):
+                case "CommentNoneMatchCondition" | "CommentAnyMatchCondition":
+                    # прежние версии экспорта записывали вместо списка слов одно слово, обычно пустое:
+                    # без слов условие сработало бы иначе, чем в исходной организации
+                    words = condition.get("words") or ([condition["word"]] if condition.get("word") else [])
+                    if not words:
+                        raise MissingFieldError(condition, "words")
+                    prepared_data.update(
+                        {
+                            "words": words,
+                            "ignoreCase": condition.get("ignoreCase"),
+                            "removeMarkup": condition.get("removeMarkup"),
+                            "noMatchBefore": condition.get("noMatchBefore"),
+                        }
+                    )
+                case "CommentStringNotMatchCondition" | "CommentFullyMatchCondition" | "CommentStringMatchCondition":
                     prepared_data.update(
                         {
                             "word": condition.get("word"),
@@ -218,6 +351,53 @@ class TriggerImporter(AutomationImporter):
                         prepared_data["user"] = self._mapper.get_user(condition["user"])
                 case "UpdatedLinkCondition" | "CreatedLinkCondition" | "RemovedLinkCondition":
                     prepared_data["relationship"] = condition.get("relationship", [])
+                case (
+                    "AllLinkedIssueCondition"
+                    | "AnyLinkedIssueCondition"
+                    | "NoneLinkedIssueCondition"
+                    | "AllLinkedIssueConditionProto"
+                    | "AnyLinkedIssueConditionProto"
+                    | "NoneLinkedIssueConditionProto"
+                ):
+                    # прежние версии экспорта выгружали это условие с типом из ответа API и без вида связи
+                    prepared_data["type"] = cond_type.removesuffix("Proto")
+                    link_filter = get_required_field(condition, "linkFilter")
+                    prepared_data["linkFilter"] = {"relationship": get_required_field(link_filter, "relationship")}
+                case (
+                    "CommentAuthorContainsAll"
+                    | "CommentAuthorContainsAny"
+                    | "CommentAuthorContainsNone"
+                    # так это условие без списка авторов записывали прежние версии экспорта
+                    | "CommentAuthorContainerConditionProto"
+                ):
+                    prepared_data["authors"] = [
+                        self._mapper.get_user(user_key(user)) for user in get_required_field(condition, "authors")
+                    ]
+                case "FieldContainsAnyUser" | "FieldContainsNoUser":
+                    field_obj = self._get_or_create_field(condition.get("field"))
+                    prepared_data["field"] = field_obj.id
+                    prepared_data["value"] = [
+                        self._mapper.get_user(user_key(user)) for user in condition.get("value") or []
+                    ]
+                case (
+                    "MultiProjectFieldEquals"
+                    | "MultiProjectFieldBecameEqual"
+                    | "MultiProjectContainerContainsAll"
+                    | "MultiProjectContainerContainsAny"
+                    | "MultiProjectContainerContainsNone"
+                ):
+                    field_obj = self._get_or_create_field(condition.get("field"))
+                    prepared_data["field"] = field_obj.id
+                    # {"any": [68]}: номера проектов исходной организации переводятся в номера целевой
+                    # прежние версии экспорта записывали проект ссылкой {"id": 68}
+                    prepared_data["value"] = {
+                        target: self._prepare_field_value(
+                            field_obj, [project_id(item) for item in ids] if isinstance(ids, list) else project_id(ids)
+                        )
+                        for target, ids in (condition.get("value") or {}).items()
+                    }
+                    if condition.get("noMatchBefore") is not None:
+                        prepared_data["noMatchBefore"] = condition["noMatchBefore"]
                 case (
                     "FieldChangedCondition"
                     | "FieldIsNotEmpty"
@@ -309,7 +489,7 @@ class AutoactionImporter(AutomationImporter):
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         prepared_data = {
             "name": input_data["name"],
-            "active": input_data.get("active"),
+            "active": self._get_active(input_data),
             "enableNotifications": input_data.get("enableNotifications"),
             "intervalMillis": input_data.get("intervalMillis"),
             "actions": self._prepare_actions_data(input_data["actions"]),

@@ -155,11 +155,62 @@
 | `actions`<span style="color: red;">*</span> | Массив объектов | Массив с действиями триггера. Подробнее в разделе [Объекты действий триггера](https://yandex.ru/support/tracker/ru/concepts/queues/change-trigger-actions) |
 | `conditions`                                | Массив объектов | Массив с условиями срабатывания триггера. Подробнее в разделе [Объекты условий срабатывания триггера](https://yandex.ru/support/tracker/ru/concepts/queues/change-trigger-conditions) |
 | `active`                                    | Логический      | Статус триггера. <br>`true` - активный; <br>`false` - неактивный    |
+| `description`                               | Строка          | Описание триггера                                                   |
+| `skipFailures`                              | Логический      | Параметр `skipFailures` триггера в API, переносится как есть         |
 
 Группы в условиях записываются не номерами, как в API, а названиями: в `value` у условий
 `UserInGroups` и `UserNotInGroups` и в `groups` у `CommentAuthorInGroups` и
 `CommentAuthorNotInGroups`. Импорт находит группу в целевой организации по названию; если там она
 называется иначе, соответствие задаётся в `mapping/groups.cfg` (см. [docs/index.md](../index.md)).
+
+Значения, которые относятся к исходной организации, записываются так, чтобы импорт мог их
+сопоставить:
+
+- пользователи — именем, как в остальной выгрузке; соответствие задаётся в `mapping/users.cfg`.
+  Так записываются `value` условий на поля с пользователями, `authors` у
+  `CommentAuthorContainsAll`, `CommentAuthorContainsAny` и `CommentAuthorContainsNone`, `summonees`
+  и пользователи в шаблоне полей `CreateIssue`;
+- проекты — номерами исходной организации, импорт переводит их в номера целевой: в `value` условий
+  `MultiProjectFieldEquals`, `MultiProjectFieldBecameEqual`, `MultiProjectContainerContainsAll`,
+  `MultiProjectContainerContainsAny`, `MultiProjectContainerContainsNone` (`{"any": [68]}`), в
+  действии `Update` поля `project` и в шаблоне полей `CreateIssue`
+  (`{"primary": 65, "secondary": []}`);
+- виды связей в `linkFilter.relationship` у `AllLinkedIssueCondition`, `AnyLinkedIssueCondition` и
+  `NoneLinkedIssueCondition` — идентификаторами: `relates`, `depends on`;
+- локальные поля в `summoneesFields` и в шаблоне полей `CreateIssue` — ключом вида `local_<ключ>`.
+
+```yaml
+- name: Проверка по связанным задачам
+  active: false
+  skipFailures: true
+  conditions:
+    - type: AllLinkedIssueCondition
+      linkFilter:
+        relationship: [relates]
+    - type: CommentAnyMatchCondition
+      words: [готово, сделано]
+  actions:
+    - type: CreateIssue
+      queue: SUPPORT
+      summary: Проверить результат
+      fieldTemplates:
+        assignee: Иван Петров
+        tags: [проверка]
+```
+
+Компоненты, версии и локальные поля в шаблоне `CreateIssue` сопоставляются в импортируемой
+очереди, поэтому для задачи в другой очереди такой триггер не создаётся. Триггер с действием
+`Duty` не создаётся.
+
+Триггер и автодействие создаются неактивными, если после переноса они работали бы иначе:
+
+- в условиях есть `AllLinkedIssueCondition`, `AnyLinkedIssueCondition` или
+  `NoneLinkedIssueCondition` — фильтр по связанным задачам не переносится, только вид связи;
+- у вебхука скрыты значения: `variables` записаны с именами и значениями `********`, `secrets` —
+  списком имён, пароль или токен в `authContext` — значением `********`. Переменные создаются с
+  этими именами, секреты не создаются.
+
+Задайте значения в целевой организации и включите автоматизацию.
 
 ---
 

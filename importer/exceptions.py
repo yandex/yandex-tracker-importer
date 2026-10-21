@@ -91,6 +91,22 @@ class GroupNotExistsError(BaseTrackerError):
         self.name = name
 
 
+class UnsupportedActionError(BaseTrackerError):
+    def __init__(self, action_type: str):
+        super().__init__(f"Action {action_type} cannot be imported, the automation is skipped")
+        self.action_type = action_type
+
+
+class FieldTemplatesNotSupportedError(BaseTrackerError):
+    def __init__(self, queue_key: str, fields: list):
+        super().__init__(
+            f"Fields {fields} of an issue created in another queue {queue_key} cannot be imported, "
+            "the automation is skipped"
+        )
+        self.queue_key = queue_key
+        self.fields = fields
+
+
 class ObjectWithDataNotCreatedError(BaseTrackerError):
     object_name = "Object"
 
