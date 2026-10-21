@@ -12,6 +12,7 @@
 - [Цели](./objects/goals.md)
 - [Дашборды](./objects/dashboards.md)
 - [Сохранённые фильтры](./objects/filters.md)
+- [Шаблоны задач и комментариев](./objects/templates.md)
 
 ## Пример структуры файлов с данными
 

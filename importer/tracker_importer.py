@@ -32,6 +32,7 @@ from .importers.fields import (
 )
 from .importers.dashboards import DashboardImporter
 from .importers.filters import FilterImporter
+from .importers.templates import CommentTemplateImporter, IssueTemplateImporter
 from .importers.entities import (
     EntityImporter,
     ProjectImporter,
@@ -89,6 +90,16 @@ class TrackerImporter:
         self._filter_importer = FilterImporter(
             client, mapper, self._global_field_importer, self._state_path
         )
+        self._issue_template_importer = IssueTemplateImporter(
+            client,
+            mapper,
+            self._state_path,
+            self._global_field_importer,
+            self._project_importer,
+            self._issue_type_importer,
+            self._resolution_importer,
+        )
+        self._comment_template_importer = CommentTemplateImporter(client, mapper, self._state_path)
         self._dashboard_importer = DashboardImporter(
             client, mapper, self._global_field_importer, self._filter_importer, self._state_path, ui_url
         )
@@ -107,6 +118,9 @@ class TrackerImporter:
             self._workflow_importer.complete_workflows()
         self._import_issue_links_with_threads()
         self._import_triggers()
+        # шаблоны — после очередей и проектов: на них ссылаются шаблоны
+        self._import_templates("issue_templates.yaml", self._issue_template_importer)
+        self._import_templates("comment_templates.yaml", self._comment_template_importer)
         # дашборды последними: их виджеты ссылаются на очереди, поля и фильтры
         self._import_filters()
         self._import_dashboards()
@@ -166,6 +180,14 @@ class TrackerImporter:
 
         for filter_data in load_yaml_file(filters_path) or []:
             self._filter_importer.get_or_create(filter_data)
+
+    def _import_templates(self, file_name: str, importer: Any) -> None:
+        templates_path = os.path.join(self._data_path, file_name)
+        if not os.path.exists(templates_path):
+            return
+
+        for template_data in load_yaml_file(templates_path) or []:
+            importer.get_or_create(template_data)
 
     def _import_dashboards(self) -> None:
         dashboards_path = os.path.join(self._data_path, "dashboards")

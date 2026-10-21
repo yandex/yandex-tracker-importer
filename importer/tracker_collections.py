@@ -105,3 +105,14 @@ def get_dashboards(client: TrackerClient) -> Dashboards:
 
 def get_widgets(client: TrackerClient) -> Widgets:
     return client._get_collection(Widgets)
+
+
+def update_template_permissions(collection: Any, path: str, template_id: Any, version: Any, data: Dict[str, Any]):
+    """Права шаблона задачи или комментария — отдельный метод API с номером версии шаблона:
+    `grant` и `revoke` по видам прав."""
+    return collection._execute_request(
+        collection._connection.patch,
+        path=f"/{{api_version}}/{path}/{template_id}/permissions",
+        params={"version": version},
+        data=data,
+    )
