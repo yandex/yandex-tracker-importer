@@ -87,6 +87,18 @@ def run_version_action(client: TrackerClient, version_id: Any, action: str):
     )
 
 
+def update_workflow(client: TrackerClient, workflow_id: str, version: Any, data: Dict[str, Any]):
+    """Изменение воркфлоу — метод API v2 с номером версии, независимо от версии API клиента:
+    переходы передаются целиком."""
+    workflows = client.workflows
+    return workflows._execute_request(
+        workflows._connection.patch,
+        path=f"/v2/workflows/{workflow_id}",
+        params={"version": version},
+        data=data,
+    )
+
+
 def get_dashboards(client: TrackerClient) -> Dashboards:
     return client._get_collection(Dashboards)
 

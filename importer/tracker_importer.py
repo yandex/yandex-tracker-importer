@@ -99,7 +99,12 @@ class TrackerImporter:
     def do_import(self) -> ImportProgressTracker:
         self._import_entities()
         self._import_entity_links_with_threads()
-        self._import_queues()
+        try:
+            self._import_queues()
+        finally:
+            # условия переходов могут ссылаться на очереди, которые импортировались позже; при сбое
+            # дополняются воркфлоу уже импортированных очередей
+            self._workflow_importer.complete_workflows()
         self._import_issue_links_with_threads()
         self._import_triggers()
         # дашборды последними: их виджеты ссылаются на очереди, поля и фильтры
@@ -197,10 +202,11 @@ class TrackerImporter:
             self._progress_tracker.report_queue(bool(queue_obj))
 
             if queue_obj is not None:
-                self._import_workflows(queue_data)
-                self._queue_importer.import_issue_types_config(queue_obj, queue_data)
+                # права — сразу: сбой дальше не должен оставить очередь с доступом по умолчанию
                 self._queue_importer.update_permissions(queue_obj, queue_data)
 
+                # локальные поля, компоненты и версии — до воркфлоу: на них ссылаются условия, экраны
+                # и функции переходов
                 local_field_importer = LocalFieldImporter(
                     client=self._client,
                     mapper=self._mapper,
@@ -222,6 +228,16 @@ class TrackerImporter:
                     queue_obj=queue_obj
                 )
                 self._import_versions(queue_data, version_importer)
+
+                self._workflow_importer.set_queue_context(
+                    local_field_importer,
+                    self._global_field_importer,
+                    component_importer,
+                    version_importer,
+                    self._project_importer,
+                )
+                self._import_workflows(queue_data)
+                self._queue_importer.import_issue_types_config(queue_obj, queue_data)
 
                 macros_importer = MacrosImporter(
                     client=self._client,

@@ -71,7 +71,9 @@ dest_tracker_ui: https://tracker.yandex.ru   # необязательный; а�
 имени (не по логину Трекера). Помоги пользователю его собрать:
 
 1. Собери уникальных пользователей из `data/` (поля `createdBy`, `assignee`,
-   `followers`, авторы `comments`/`worklogs`/`attachments`, `lead`, `teamUsers`).
+   `followers`, авторы `comments`/`worklogs`/`attachments`, `lead`, `teamUsers`; в воркфлоу
+   очередей — `users`, `user`, `author` в условиях и функциях переходов, `commentSummonees` и
+   значения полей по умолчанию на экранах).
 2. Для каждого предложи строку `<как в data>:<логин в Трекере>`.
 3. Незамапленные значения уйдут в Трекер как есть и, скорее всего, не найдутся —
    надо замапить всех: можно маппить отсутствующих в какую-то заранее оговоренную учетку по умолчанию.
@@ -81,13 +83,16 @@ dest_tracker_ui: https://tracker.yandex.ru   # необязательный; а�
 
 1. Собери уникальные группы из `data/`: `permissions.*.groups` в `queues/*/queue.yaml`;
    в условиях триггеров там же — `value` у `UserInGroups`/`UserNotInGroups` и `groups` у
-   `CommentAuthorInGroups`/`CommentAuthorNotInGroups`; `permissions.acl.*.groups` в файлах
-   проектов, целей и портфелей.
+   `CommentAuthorInGroups`/`CommentAuthorNotInGroups`; в воркфлоу — `group` и `department` в
+   условиях и функциях переходов; `permissions.acl.*.groups` в файлах проектов, целей и
+   портфелей.
 2. Сверь их со списком групп целевой организации (`GET /v2/groups`).
 3. Для отличающихся предложи строку `<как в data>:<название или номер группы в Трекере>`.
    Номер надёжнее: он однозначен при одноимённых группах и не зависит от языка.
 4. Ненайденная группа в права не попадает — в журнале `Group … is not found, it is skipped
-   in permissions`, — а триггер с ней в условии не создаётся (`Group … does not exist`).
+   in permissions`, — триггер с ней в условии не создаётся (`Group … does not exist`), а
+   воркфлоу создаётся только с переходами (`Workflow … is created without conditions`). После
+   исправления сопоставления повторный прогон дополнит такой воркфлоу.
 
 ---
 
