@@ -116,3 +116,24 @@ def update_template_permissions(collection: Any, path: str, template_id: Any, ve
         params={"version": version},
         data=data,
     )
+
+
+def create_live_board(client: TrackerClient, data: Dict[str, Any]):
+    """Доска создаётся отдельным методом API v3: он принимает колонки, правила добавления и
+    удаления задач и спринты."""
+    boards = client.boards
+    return boards._execute_request(boards._connection.post, path="/v3/liveBoards", data=data)
+
+
+def update_sprint(client: TrackerClient, sprint_id: Any, version: Any, data: Dict[str, Any]):
+    sprints = client.sprints
+    return sprints._execute_request(
+        sprints._connection.patch, path=f"/{{api_version}}/sprints/{sprint_id}", params={"version": version}, data=data,
+    )
+
+
+def delete_sprint(client: TrackerClient, sprint_id: Any, version: Any):
+    sprints = client.sprints
+    return sprints._execute_request(
+        sprints._connection.delete, path=f"/{{api_version}}/sprints/{sprint_id}", params={"version": version},
+    )

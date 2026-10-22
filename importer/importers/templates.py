@@ -11,6 +11,7 @@ from .base import CachedImporter
 from .entities import ProjectImporter
 from .fields import GlobalFieldImporter
 from .global_objects import IssueTypeImporter, ResolutionImporter
+from ..exceptions import BoardNotInDumpError
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
 from ..state import ImportState
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # компоненты и версии API принимает названием и ищет в очереди шаблона
 QUEUE_BOUND_FIELDS = {"components", "fixVersions", "affectedVersions"}
+BOARD_FIELDS = {"boards", "sprint"}
 
 
 class TemplateImporter(CachedImporter, ABC):
@@ -185,10 +187,12 @@ class IssueTemplateImporter(TemplateImporter):
         project_importer: ProjectImporter,
         issue_type_importer: IssueTypeImporter,
         resolution_importer: ResolutionImporter,
+        board_importer: Any = None,
     ) -> None:
         super().__init__(client, mapper, state_path)
         self._global_field_importer = global_field_importer
         self._project_importer = project_importer
+        self._board_importer = board_importer
         # тип задачи и резолюция шаблона могут не встречаться в очередях выгрузки
         self._reference_importers = {"type": issue_type_importer, "resolution": resolution_importer}
         self._fields = []
@@ -220,11 +224,19 @@ class IssueTemplateImporter(TemplateImporter):
                 )
                 continue
             field_obj = self._global_field_importer.get_or_create(field_key)
-            self._fields.append(field_obj)
             if field_obj.key in self._reference_importers and isinstance(value, str):
                 self._reference_importers[field_obj.key].get_or_create(value)
+            if field_obj.key in BOARD_FIELDS:
+                # шаблон без доски или спринта не из выгрузки менее заполнен, но работает так же
+                value = self._keep_transferred_boards(field_obj, value, input_data["name"])
+                if not value:
+                    continue
+            self._fields.append(field_obj)
             field_templates[field_obj.id] = self._prepare_field_value(field_obj, value)
 
+        if not field_templates:
+            # шаблон без полей API не создаёт
+            raise ValueError(f"{self.object_name} {input_data['name']} has no fields that can be imported")
         return {
             **self._prepare_common_data(input_data),
             "fieldTemplates": field_templates,
@@ -243,13 +255,28 @@ class IssueTemplateImporter(TemplateImporter):
             return None
         return super()._try_creating_object(input_data)
 
+    def _keep_transferred_boards(self, field_obj: Resource, value: Any, name: str) -> Any:
+        """Доски и спринты, которых нет в выгрузке, отбрасываются по одному, остальные остаются."""
+        items = value if isinstance(value, list) else [value]
+        kept = []
+        for item in items:
+            try:
+                prepare_field_value(field_obj, [item], self._mapper, board_importer=self._board_importer)
+            except BoardNotInDumpError:
+                logger.warning(f"Board or sprint {item} in field {field_obj.key} of {self.object_name} {name} is skipped: it is not in the dump")
+            else:
+                kept.append(item)
+        return kept if isinstance(value, list) else (kept[0] if kept else None)
+
     def _prepare_field_value(self, field_obj: Resource, value: Any) -> Any:
         if field_obj.key in QUEUE_BOUND_FIELDS:
             return value
         if field_obj.key == "project" and isinstance(value, dict):
             # {"primary": 65, "secondary": [57]}: номера проектов переводятся в номера целевой организации
             return {target: self._prepare_field_value(field_obj, ids) for target, ids in value.items()}
-        return prepare_field_value(field_obj, value, self._mapper, project_importer=self._project_importer)
+        return prepare_field_value(
+            field_obj, value, self._mapper, project_importer=self._project_importer, board_importer=self._board_importer
+        )
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
         """Поле с запретом редактирования API в шаблон не принимает: запрет снимается на время

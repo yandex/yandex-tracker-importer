@@ -13,6 +13,7 @@
 - [Дашборды](./objects/dashboards.md)
 - [Сохранённые фильтры](./objects/filters.md)
 - [Шаблоны задач и комментариев](./objects/templates.md)
+- [Доски и спринты](./objects/boards.md)
 
 ## Пример структуры файлов с данными
 

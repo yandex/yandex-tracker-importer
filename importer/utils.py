@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Type, Tuple, Union
 
 from yandex_tracker_client.objects import Resource
 
-from .exceptions import MissingFieldError
+from .exceptions import BoardNotInDumpError, MissingFieldError
 from .mapper import EntityMapper
 
 logger = logging.getLogger(__name__)
@@ -118,6 +118,7 @@ def prepare_field_value(
     project_importer: Any = None,
     component_importer: Any = None,
     version_importer: Any = None,
+    board_importer: Any = None,
 ) -> Any:
     """Приводит значение поля к целевой организации.
 
@@ -150,6 +151,18 @@ def prepare_field_value(
             return process_value(value, lambda v: component_importer.get_component_by_name(v).id)
         case "fixVersions" | "affectedVersions" if version_importer is not None:
             return process_value(value, lambda v: version_importer.get_version_by_name(v).id)
+        case "boards" | "sprint" if board_importer is not None:
+            # номер перенесённой доски или спринта; без доски из выгрузки значение работало бы иначе
+            getter = board_importer.get_board_id if field_obj.key == "boards" else board_importer.get_sprint_id
+
+            def map_board(item: Any) -> Any:
+                source_id = item.get("id") if isinstance(item, dict) else item
+                target_id = getter(source_id)
+                if target_id is None:
+                    raise BoardNotInDumpError(f"Board or sprint {source_id}")
+                return target_id
+
+            return process_value(value, map_board)
         case "project" | "components" | "fixVersions" | "affectedVersions":
             logger.warning(
                 f"Field {field_obj.key} is bound to a queue and is left as is: {value}"

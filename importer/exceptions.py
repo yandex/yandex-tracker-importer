@@ -166,5 +166,17 @@ class FilterNameConflictError(BaseTrackerError):
         self.name = name
 
 
+class BoardNotImportedError(BaseTrackerError):
+    def __init__(self, name: str):
+        super().__init__(f"{name} from the dump is not imported yet")
+        self.name = name
+
+
+class BoardNotInDumpError(BaseTrackerError):
+    def __init__(self, name: str):
+        super().__init__(f"{name} is not in the dump or cannot be created")
+        self.name = name
+
+
 class ConfigValidationError(Exception):
     pass

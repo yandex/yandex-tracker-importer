@@ -12,6 +12,8 @@ from .base import CachedImporter, GetOrCreateImporter
 from ..constants import ALL_PARTICIPANTS_GROUP_ID
 from ..exceptions import (
     BaseTrackerError,
+    BoardNotImportedError,
+    BoardNotInDumpError,
     ComponentNotExistsError,
     GroupNotExistsError,
     VersionNotExistsError
@@ -55,13 +57,14 @@ class WorkflowImporter(GetOrCreateImporter):
 
     # ключи условий и функций перехода по виду ссылки, которую надо сопоставить
     USER_KEYS = {"users", "user", "author"}
-    # доски не переносятся
-    SKIPPED_FUNCTIONS = {"SetActiveSprintFunction"}
+    # функция ссылается на доску: переносится вместе с ней
+    BOARD_FUNCTIONS = {"SetActiveSprintFunction"}
     FIELD_KEYS = {"field", "fields", "target", "source", "from", "to"}
     COMPONENT_KEYS = {"component", "components"}
 
-    def __init__(self, client: TrackerClient, mapper: EntityMapper) -> None:
+    def __init__(self, client: TrackerClient, mapper: EntityMapper, board_importer: Any = None) -> None:
         super().__init__(client, mapper)
+        self._board_importer = board_importer
         self._group_resolver = None
         self._uses_local_fields = False
         self._context = (None, None, None, None, None)
@@ -237,14 +240,20 @@ class WorkflowImporter(GetOrCreateImporter):
                     else self._get_group_id(default)
                 )
             elif element.get("defaultValue") is not None:
-                prepared_element["defaultValue"] = prepare_field_value(
-                    field_obj,
-                    element["defaultValue"],
-                    self._mapper,
-                    project_importer=self._project_importer,
-                    component_importer=self._component_importer,
-                    version_importer=self._version_importer,
-                )
+                try:
+                    prepared_element["defaultValue"] = prepare_field_value(
+                        field_obj,
+                        element["defaultValue"],
+                        self._mapper,
+                        project_importer=self._project_importer,
+                        component_importer=self._component_importer,
+                        version_importer=self._version_importer,
+                        board_importer=self._board_importer,
+                    )
+                except BoardNotInDumpError:
+                    # как функция перехода: доски нет в выгрузке — значение по умолчанию не переносится
+                    logger.warning(f"Default value of field {element['field']} on a screen is skipped: its board is not in the dump")
+                    prepared_element.pop("defaultValue", None)
             prepared["elements"].append(prepared_element)
         return prepared
 
@@ -254,9 +263,13 @@ class WorkflowImporter(GetOrCreateImporter):
         стало бы шире, чем было."""
         prepared = []
         for item in items:
-            if item.get("type") in self.SKIPPED_FUNCTIONS:
-                # доски не переносятся
-                logger.warning(f"Workflow function {item} is skipped: boards are not imported")
+            if item.get("type") in self.BOARD_FUNCTIONS:
+                # пока доски не созданы, BoardNotImportedError: воркфлоу дополняется после них
+                board_id = self._board_importer.get_board_id(item.get("board")) if self._board_importer else None
+                if board_id is None:
+                    logger.warning(f"Workflow function {item} is skipped: its board is not in the dump")
+                    continue
+                prepared.append({**item, "board": board_id})
                 continue
             prepared.append({key: self._prepare_workflow_item_value(key, value) for key, value in item.items()})
         return prepared
@@ -314,6 +327,10 @@ class WorkflowImporter(GetOrCreateImporter):
         self._uses_local_fields = False
         try:
             prepared_data = self._prepare_data(input_data)
+        except BoardNotImportedError:
+            # функция перехода ссылается на доску, которую импорт создаёт после всех очередей
+            logger.info(f"Workflow {input_data.get('key')} is completed with its transition settings after boards are imported")
+            return super()._try_creating_object(self._strip_transition_settings(input_data))
         except (BaseTrackerError, NotFound, BadRequest, UnprocessableEntity):
             # данных не сопоставить: например, группы нет в целевой организации
             logger.exception(f"Error preparing data for {self.object_name} with data: {input_data}")
@@ -341,15 +358,21 @@ class WorkflowImporter(GetOrCreateImporter):
             )
         return workflow
 
-    @staticmethod
-    def _has_transition_settings(input_data: Dict[str, Any]) -> bool:
+    def _has_transition_settings(self, input_data: Dict[str, Any]) -> bool:
         steps = input_data.get("steps") or []
         actions = [input_data.get("initialAction") or {}]
         for step in steps:
             actions += (step.get("actions") or []) + ([step["metaAction"]] if step.get("metaAction") else [])
 
         def transferred(functions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            return [function for function in functions or [] if function.get("type") not in WorkflowImporter.SKIPPED_FUNCTIONS]
+            # функция с доской, которой нет в выгрузке, не переносится
+            # у воркфлоу целевой организации доска — ссылка: функция уже перенесена
+            return [
+                function for function in functions or []
+                if function.get("type") not in self.BOARD_FUNCTIONS
+                or isinstance(function.get("board"), dict)
+                or (self._board_importer is not None and self._board_importer.in_dump(function.get("board")))
+            ]
 
         return any(step.get("afterCommentCreated") for step in steps) or any(
             action.get("conditions")

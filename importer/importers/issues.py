@@ -7,6 +7,7 @@ from yandex_tracker_client.objects import Resource
 from yandex_tracker_client.exceptions import BadRequest
 
 from .base import GetOrCreateImporter
+from .boards import BoardImporter
 from .entities import GoalImporter, ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
@@ -41,9 +42,11 @@ class IssueImporter(GetOrCreateImporter):
         goal_importer: GoalImporter,
         issue_links_collector: IssueLinksCollector,
         ui_url: str = DEFAULT_TRACKER_UI_URL,
+        board_importer: Optional[BoardImporter] = None,
     ):
         super().__init__(client, mapper)
         self._ui_url = ui_url
+        self._board_importer = board_importer
         self._local_field_importer = local_field_importer
         self._global_field_importer = global_field_importer
         self._component_importer = component_importer
@@ -153,6 +156,8 @@ class IssueImporter(GetOrCreateImporter):
                     else []
                 ),
             },
+            "boards": self._map_board_refs(input_data.get("boards"), "get_board_id", issue_key),
+            "sprint": self._map_board_refs(input_data.get("sprint"), "get_sprint_id", issue_key),
             "tags": input_data.get("tags", []),
             "followingMaillists": input_data.get("followingMaillists", []),
             "originalEstimation": input_data.get("originalEstimation"),
@@ -175,6 +180,23 @@ class IssueImporter(GetOrCreateImporter):
                 prepared_data[field_obj.id] = map_custom_user_field_value(field_obj, value, self._mapper)
 
         return clean_empty(prepared_data)
+
+    def _map_board_refs(self, source_ids: Optional[List[Any]], method: str, issue_key: str) -> List[str]:
+        """Доски и спринты задачи — номерами перенесённых. Доски, которой нет в выгрузке (например,
+        старого типа) или которую нельзя создать из-за данных, задача лишается с предупреждением;
+        доска, не созданная из-за временного сбоя, — ошибка: задача доедет повторным прогоном."""
+        if not source_ids or self._board_importer is None:
+            return []
+        mapped = []
+        for source_id in source_ids:
+            target_id = getattr(self._board_importer, method)(source_id)
+            if target_id is None:
+                logger.warning(
+                    f"Board or sprint {source_id} of issue {issue_key} is not in the dump or cannot be created, it is skipped"
+                )
+            else:
+                mapped.append(target_id)
+        return mapped
 
     def _get_object(self, data: Dict[str, Any]) -> Optional[Resource]:
         return self._client.issues.get(self._mapper.get_issue_key(data['key']))

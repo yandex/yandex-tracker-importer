@@ -10,6 +10,7 @@ from .entities import ProjectImporter
 from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
 from ..exceptions import (
+    BoardNotInDumpError,
     FieldTemplatesNotSupportedError,
     GroupNotExistsError,
     MissingFieldError,
@@ -66,8 +67,10 @@ class AutomationImporter(CachedImporter):
         component_importer: ComponentImporter,
         version_importer: VersionImporter,
         project_importer: ProjectImporter,
+        board_importer: Any = None,
     ) -> None:
         super().__init__(client, mapper)
+        self._board_importer = board_importer
         self._queue_obj = queue_obj
         self._local_field_importer = local_field_importer
         self._global_field_importer = global_field_importer
@@ -138,6 +141,7 @@ class AutomationImporter(CachedImporter):
             project_importer=self._project_importer,
             component_importer=self._component_importer,
             version_importer=self._version_importer,
+            board_importer=self._board_importer,
         )
 
     def _prepare_field_templates(self, action_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -241,6 +245,16 @@ class AutomationImporter(CachedImporter):
                         prepared_data["update"][field_obj.id] = self._prepare_field_update(field_obj, update)
                 case "Move":
                     prepared_data["queue"] = self._mapper.get_queue(action_data.get("queue"))
+                case "SetActiveSprint":
+                    board_id = self._board_importer.get_board_id(action_data.get("board")) if self._board_importer else None
+                    if board_id is None:
+                        # как функция перехода: доски нет в выгрузке, например старого типа
+                        logger.warning(
+                            f"Action SetActiveSprint of {self.object_name} {action_data.get('board')} is skipped: "
+                            "its board is not in the dump or cannot be created"
+                        )
+                        continue
+                    prepared_data["board"] = board_id
                 case "CreateComment":
                     prepared_data["text"] = action_data.get("text")
                     prepared_data["fromRobot"] = action_data.get("fromRobot")
@@ -294,6 +308,9 @@ class AutomationImporter(CachedImporter):
                     raise UnsupportedActionError(action_type)
 
             prepared_actions.append(prepared_data)
+        if actions and not prepared_actions:
+            # все действия пропущены: автоматизация без действий не создаётся
+            raise BoardNotInDumpError("Boards of all actions")
         return prepared_actions
 
 
@@ -469,7 +486,11 @@ class TriggerImporter(AutomationImporter):
                 ):
                     field_obj = self._get_or_create_field(condition.get("field"))
                     prepared_data["field"] = field_obj.id
-                    prepared_data["value"] = self._prepare_field_value(field_obj, condition.get("value"))
+                    prepared_data["value"] = (
+                        # в условии на размер значение — число, а не ссылка на объект поля
+                        condition.get("value") if cond_type.startswith("Container.Size")
+                        else self._prepare_field_value(field_obj, condition.get("value"))
+                    )
                 case "ContainerContainsNone" | "ContainerContainsAll" | "ContainerContainsAny":
                     field_obj = self._get_or_create_field(condition.get("field"))
                     prepared_data.update(

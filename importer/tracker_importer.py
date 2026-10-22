@@ -31,6 +31,7 @@ from .importers.fields import (
     GlobalFieldImporter
 )
 from .importers.dashboards import DashboardImporter
+from .importers.boards import BoardImporter
 from .importers.filters import FilterImporter
 from .importers.templates import CommentTemplateImporter, IssueTemplateImporter
 from .importers.entities import (
@@ -81,11 +82,26 @@ class TrackerImporter:
         self._resolution_importer = ResolutionImporter(client, mapper, data_path)
         self._category_importer = CategoryImporter(client, mapper, data_path)
         self._global_field_importer = GlobalFieldImporter(client, mapper, data_path, self._category_importer)
-        self._workflow_importer = WorkflowImporter(client, mapper)
         self._queue_importer = QueueImporter(client, mapper)
         self._project_importer = ProjectImporter(client, mapper, self._entity_links_collector, ui_url)
         self._goal_importer = GoalImporter(client, mapper, self._entity_links_collector, ui_url)
         self._portfolio_importer = PortfolioImporter(client, mapper, self._entity_links_collector, ui_url)
+        self._board_importer = BoardImporter(
+            client,
+            mapper,
+            data_path,
+            self._state_path,
+            self._global_field_importer,
+            self._project_importer,
+            ui_url,
+            self._status_importer,
+            self._issue_type_importer,
+            self._resolution_importer,
+        )
+        self._queued_issues = []
+        self._queued_automations = []
+        self._queue_failed = False
+        self._workflow_importer = WorkflowImporter(client, mapper, self._board_importer)
 
         self._filter_importer = FilterImporter(
             client, mapper, self._global_field_importer, self._state_path
@@ -98,6 +114,7 @@ class TrackerImporter:
             self._project_importer,
             self._issue_type_importer,
             self._resolution_importer,
+            self._board_importer,
         )
         self._comment_template_importer = CommentTemplateImporter(client, mapper, self._state_path)
         self._dashboard_importer = DashboardImporter(
@@ -112,10 +129,12 @@ class TrackerImporter:
         self._import_entity_links_with_threads()
         try:
             self._import_queues()
-        finally:
-            # условия переходов могут ссылаться на очереди, которые импортировались позже; при сбое
-            # дополняются воркфлоу уже импортированных очередей
-            self._workflow_importer.complete_workflows()
+        except Exception:
+            # очереди, импортированные до сбоя, получают доски, воркфлоу и задачи, как и раньше; при
+            # прерывании (Ctrl+C) импорт останавливается
+            self._import_after_queues(after_failure=True)
+            raise
+        self._import_after_queues(after_failure=self._queue_failed)
         self._import_issue_links_with_threads()
         self._import_triggers()
         # шаблоны — после очередей и проектов: на них ссылаются шаблоны
@@ -127,6 +146,18 @@ class TrackerImporter:
         self._update_entities_metrics()
 
         return self._progress_tracker
+
+    def _import_after_queues(self, after_failure: bool = False) -> None:
+        # доски — после очередей, на которые смотрят их правила, и до задач, которые на них лежат
+        self._board_importer.import_boards(after_failure)
+        # условия переходов могут ссылаться на очереди, которые импортировались позже, а функции —
+        # на доски
+        self._workflow_importer.complete_workflows()
+        for importer, automations in self._queued_automations:
+            for automation_data in automations:
+                importer.get_or_create(automation_data)
+        for queue_dir, issues_importer in self._queued_issues:
+            self._import_issues_with_threads(queue_dir, issues_importer)
 
     def _update_entities_metrics(self) -> None:
         """Метрики проставляются после дашбордов: до их импорта адрес виджета ещё неизвестен."""
@@ -222,6 +253,9 @@ class TrackerImporter:
 
             queue_obj = self._queue_importer.get_or_create(queue_data)
             self._progress_tracker.report_queue(bool(queue_obj))
+            if queue_obj is None:
+                # доска с правилом на эту очередь не создастся — это не окончательный отказ
+                self._queue_failed = True
 
             if queue_obj is not None:
                 # права — сразу: сбой дальше не должен оставить очередь с доступом по умолчанию
@@ -269,10 +303,9 @@ class TrackerImporter:
                     global_field_importer=self._global_field_importer,
                     component_importer=component_importer,
                     version_importer=version_importer,
-                    project_importer=self._project_importer
+                    project_importer=self._project_importer,
+                    board_importer=self._board_importer,
                 )
-                for macro_data in queue_data.get("macros", []):
-                    macros_importer.get_or_create(macro_data)
 
                 autoaction_importer = AutoactionImporter(
                     client=self._client,
@@ -282,10 +315,12 @@ class TrackerImporter:
                     global_field_importer=self._global_field_importer,
                     component_importer=component_importer,
                     version_importer=version_importer,
-                    project_importer=self._project_importer
+                    project_importer=self._project_importer,
+                    board_importer=self._board_importer,
                 )
-                for autoaction_data in queue_data.get("autoactions", []):
-                    autoaction_importer.get_or_create(autoaction_data)
+                # макросы и автодействия — после досок: в изменениях полей бывают доски и спринты
+                self._queued_automations.append((macros_importer, queue_data.get("macros", [])))
+                self._queued_automations.append((autoaction_importer, queue_data.get("autoactions", [])))
 
                 if queue_data.get("triggers"):
                     self._trigger_importers[queue_obj.key] = TriggerImporter(
@@ -296,7 +331,8 @@ class TrackerImporter:
                         global_field_importer=self._global_field_importer,
                         component_importer=component_importer,
                         version_importer=version_importer,
-                        project_importer=self._project_importer
+                        project_importer=self._project_importer,
+                        board_importer=self._board_importer,
                     )
                     self._triggers_collector[queue_obj.key] = queue_data["triggers"]
 
@@ -310,9 +346,11 @@ class TrackerImporter:
                     project_importer=self._project_importer,
                     goal_importer=self._goal_importer,
                     issue_links_collector=self._issue_links_collector,
-                    ui_url=self._ui_url
+                    ui_url=self._ui_url,
+                    board_importer=self._board_importer,
                 )
-                self._import_issues_with_threads(queue_dir, issues_importer)
+                # задачи — после досок и спринтов всех очередей
+                self._queued_issues.append((queue_dir, issues_importer))
 
     def _import_statuses(self, queue_data: Dict[str, Any]) -> None:
         for workflow in get_required_field(queue_data, "workflows"):
