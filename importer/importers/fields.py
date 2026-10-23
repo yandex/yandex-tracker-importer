@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 from yandex_tracker_client import TrackerClient
+from yandex_tracker_client.exceptions import NotFound
 from yandex_tracker_client.objects import Resource
 
 from .base import CachedImporter, GlobalObjectImporter
@@ -16,6 +17,9 @@ from ..utils import clean_empty, get_optional, load_yaml_file
 
 
 logger = logging.getLogger(__name__)
+
+# категория системных полей Трекера
+SYSTEM_FIELDS_CATEGORY_ID = "000000000000000000000001"
 
 
 class CategoryImporter(GlobalObjectImporter):
@@ -106,8 +110,15 @@ class FieldImporter(CachedImporter, ABC):
             yield
             return
 
+        try:
+            self._set_readonly(field_obj, False)
+        except NotFound:
+            # у системного поля, например статуса, запрет редактирования не меняется
+            if get_optional(get_optional(field_obj, "category"), "id") != SYSTEM_FIELDS_CATEGORY_ID:
+                raise
+            yield
+            return
         logger.info(f"Field {field_obj.id} is made editable while {purpose}")
-        self._set_readonly(field_obj, False)
         try:
             yield
         finally:

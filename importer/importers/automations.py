@@ -335,15 +335,43 @@ class MacrosImporter(AutomationImporter):
         for field_key, update in input_data.get("issueUpdate", {}).items():
             field_obj = self._get_or_create_field(field_key)
             self._add_written_field(field_obj, checked_for_local=False)
-            issue_update_data[field_obj.key] = self._prepare_field_update(field_obj, update)
+            issue_update_data[field_obj.id] = self._prepare_field_update(field_obj, update)
+        field_changes = []
+        for field_key, value in (input_data.get("fieldChanges") or {}).items():
+            field_obj = self._get_or_create_field(field_key)
+            self._add_written_field(field_obj, checked_for_local=False)
+            if field_obj.key == "project" and self._is_project_target_update(value):
+                # проект: {"primary": 13, "secondary": [14]}
+                prepared = {
+                    "primary": self._prepare_field_value(field_obj, value["primary"]) if value.get("primary") else None,
+                    "secondary": [self._prepare_field_value(field_obj, item) for item in value.get("secondary") or []],
+                }
+            else:
+                prepared = self._prepare_field_value(field_obj, value)
+            field_changes.append({"field": field_obj.id, "value": prepared})
 
         return {
             "name": input_data["name"],
             "body": input_data.get("body"),
             # пустой issueUpdate API не принимает
             **({"issueUpdate": issue_update_data} if issue_update_data else {}),
+            **({"fieldChanges": field_changes} if field_changes else {}),
             **({"description": input_data["description"]} if input_data.get("description") is not None else {}),
+            **self._prepare_summonees(input_data),
         }
+
+    def _prepare_summonees(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Призываемые пользователи, поля с пользователями и рассылки."""
+        summonees = {}
+        if input_data.get("summonees"):
+            summonees["summonees"] = [self._mapper.get_user(user) for user in input_data["summonees"]]
+        if input_data.get("summoneesFields"):
+            summonees["summoneesFields"] = [
+                self._get_or_create_field(field_key).id for field_key in input_data["summoneesFields"]
+            ]
+        if input_data.get("maillistSummonees"):
+            summonees["maillistSummonees"] = input_data["maillistSummonees"]
+        return summonees
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
         return self._create_with_writable_fields(
