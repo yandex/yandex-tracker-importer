@@ -53,7 +53,9 @@ class TextNormalizer:
 
             url = self._url_generator(attachment_obj.id)
             prefix = "!" if self._is_image(filename) else ""
-            return f"{prefix}[{attachment_obj.name}]({url})"
+            # размер картинки `![name](=400x400)`; у ссылки на файл размера нет
+            size = re.fullmatch(r"\s*(=(?:\d+x\d*|x\d+))\s*", match.group(2)) if prefix else None
+            return f"{prefix}[{attachment_obj.name}]({url}{' ' + size.group(1) if size else ''})"
 
         return re.sub(r"\!?\[([^\]]+)\]\(([^\)]*)\)", replace_attachment_link, text, flags=re.MULTILINE)
 

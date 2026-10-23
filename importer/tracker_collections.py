@@ -137,3 +137,11 @@ def delete_sprint(client: TrackerClient, sprint_id: Any, version: Any):
     return sprints._execute_request(
         sprints._connection.delete, path=f"/{{api_version}}/sprints/{sprint_id}", params={"version": version},
     )
+
+
+def get_user_queue_permissions(client: TrackerClient, queue_key: str, user_id: Any) -> Dict[str, Any]:
+    """Действующие права пользователя в очереди: виды прав, включая `DENY`, и субъекты, через
+    которые они действуют."""
+    queues = client.queues
+    answer = queues._execute_request(queues._connection.get, path=f"/v2/queues/{queue_key}/permissions/users/{user_id}")
+    return answer.as_dict() if hasattr(answer, "as_dict") else dict(answer or {})

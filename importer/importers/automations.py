@@ -174,7 +174,7 @@ class AutomationImporter(CachedImporter):
     def _get_active(self, input_data: Dict[str, Any]) -> Optional[bool]:
         """Автоматизация, которая после переноса работала бы иначе, создаётся неактивной: условие
         на связанные задачи переносится без фильтра по ним, а у вебхука скрыты значения
-        переменных, секреты, пароли и токены."""
+        переменных, секреты, пароли и токены — в том числе в заголовках."""
         active = input_data.get("active")
         reasons = []
         if any(
@@ -184,7 +184,11 @@ class AutomationImporter(CachedImporter):
             reasons.append("the filter on linked issues is not transferred")
         if any(
             action.get("type") == "Webhook"
-            and (action.get("variables") or action.get("secrets") or has_masked_value(action.get("authContext")))
+            and (
+                action.get("variables")
+                or action.get("secrets")
+                or has_masked_value([action.get("authContext"), action.get("headers")])
+            )
             for action in input_data.get("actions") or []
         ):
             reasons.append("webhook secrets are masked in the dump, set them manually")
@@ -245,6 +249,8 @@ class AutomationImporter(CachedImporter):
                         prepared_data["update"][field_obj.id] = self._prepare_field_update(field_obj, update)
                 case "Move":
                     prepared_data["queue"] = self._mapper.get_queue(action_data.get("queue"))
+                    if "moveAllFields" in action_data:
+                        prepared_data["moveAllFields"] = action_data["moveAllFields"]
                 case "SetActiveSprint":
                     board_id = self._board_importer.get_board_id(action_data.get("board")) if self._board_importer else None
                     if board_id is None:
@@ -334,7 +340,9 @@ class MacrosImporter(AutomationImporter):
         return {
             "name": input_data["name"],
             "body": input_data.get("body"),
-            "issueUpdate": issue_update_data,
+            # пустой issueUpdate API не принимает
+            **({"issueUpdate": issue_update_data} if issue_update_data else {}),
+            **({"description": input_data["description"]} if input_data.get("description") is not None else {}),
         }
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
@@ -552,6 +560,8 @@ class AutoactionImporter(AutomationImporter):
             "intervalMillis": input_data.get("intervalMillis"),
             "actions": self._prepare_actions_data(input_data["actions"]),
         }
+        if input_data.get("description") is not None:
+            prepared_data["description"] = input_data["description"]
 
         if input_data.get("filter") is not None:
             prepared_data["filter"] = self._prepare_filter_data(input_data["filter"])

@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -125,6 +126,15 @@ class TrackerImporter:
         self._triggers_collector = {}
 
     def do_import(self) -> ImportProgressTracker:
+        try:
+            self._import_all()
+        finally:
+            # запрет доступа ставится последним и при любом исходе прогона
+            self._queue_importer.update_deny_permissions()
+
+        return self._progress_tracker
+
+    def _import_all(self) -> None:
         self._import_entities()
         self._import_entity_links_with_threads()
         try:
@@ -144,8 +154,6 @@ class TrackerImporter:
         self._import_filters()
         self._import_dashboards()
         self._update_entities_metrics()
-
-        return self._progress_tracker
 
     def _import_after_queues(self, after_failure: bool = False) -> None:
         # доски — после очередей, на которые смотрят их правила, и до задач, которые на них лежат
@@ -260,6 +268,7 @@ class TrackerImporter:
             if queue_obj is not None:
                 # права — сразу: сбой дальше не должен оставить очередь с доступом по умолчанию
                 self._queue_importer.update_permissions(queue_obj, queue_data)
+                self._lift_deny(queue_obj, queue_data, queue_dir)
 
                 # локальные поля, компоненты и версии — до воркфлоу: на них ссылаются условия, экраны
                 # и функции переходов
@@ -281,7 +290,8 @@ class TrackerImporter:
                 version_importer = VersionImporter(
                     client=self._client,
                     mapper=self._mapper,
-                    queue_obj=queue_obj
+                    queue_obj=queue_obj,
+                    retry_forbidden=functools.partial(self._queue_importer.retry_forbidden, queue_obj.key),
                 )
                 self._import_versions(queue_data, version_importer)
 
@@ -348,6 +358,7 @@ class TrackerImporter:
                     issue_links_collector=self._issue_links_collector,
                     ui_url=self._ui_url,
                     board_importer=self._board_importer,
+                    retry_forbidden=functools.partial(self._queue_importer.retry_forbidden, queue_obj.key),
                 )
                 # задачи — после досок и спринтов всех очередей
                 self._queued_issues.append((queue_dir, issues_importer))
@@ -395,6 +406,13 @@ class TrackerImporter:
                     self._mapper.get_queue(queue_data["key"]),
                     component_data
                 )
+
+    def _lift_deny(self, queue_obj: Resource, queue_data: Dict[str, Any], queue_dir: str) -> None:
+        """Снимает запрет прошлого прогона до импорта версий и задач очереди."""
+        if queue_data.get("versions") or any(
+            os.path.isdir(os.path.join(queue_dir, name)) for name in os.listdir(queue_dir)
+        ):
+            self._queue_importer.lift_deny(queue_obj.key)
 
     def _import_versions(self, queue_data: Dict[str, Any], version_importer: VersionImporter) -> None:
         for version_data in queue_data.get("versions", []):

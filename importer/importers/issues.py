@@ -1,10 +1,10 @@
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
-from yandex_tracker_client.exceptions import BadRequest
+from yandex_tracker_client.exceptions import BadRequest, Forbidden
 
 from .base import GetOrCreateImporter
 from .boards import BoardImporter
@@ -43,9 +43,12 @@ class IssueImporter(GetOrCreateImporter):
         issue_links_collector: IssueLinksCollector,
         ui_url: str = DEFAULT_TRACKER_UI_URL,
         board_importer: Optional[BoardImporter] = None,
+        retry_forbidden: Callable[[Callable[[], Any]], Any] = lambda request: request(),
     ):
         super().__init__(client, mapper)
         self._ui_url = ui_url
+        # повтор отказа в доступе у очереди со снятым запретом
+        self._retry_forbidden = retry_forbidden
         self._board_importer = board_importer
         self._local_field_importer = local_field_importer
         self._global_field_importer = global_field_importer
@@ -199,10 +202,17 @@ class IssueImporter(GetOrCreateImporter):
         return mapped
 
     def _get_object(self, data: Dict[str, Any]) -> Optional[Resource]:
-        return self._client.issues.get(self._mapper.get_issue_key(data['key']))
+        return self._retry_forbidden(lambda: self._client.issues.get(self._mapper.get_issue_key(data['key'])))
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
-        return self._client.issues.import_object(**prepared_data)
+        try:
+            return self._retry_forbidden(lambda: self._client.issues.import_object(**prepared_data))
+        except Forbidden:
+            logger.error(
+                f"Access to queue {prepared_data.get('queue')} is denied to the import account: check the queue "
+                "permissions in the target organization, for example a deny permission set manually"
+            )
+            raise
 
     def _create_local_fields(self, data: Dict[str, Any], issue_obj: Resource) -> Optional[Resource]:
         queue_key = self._mapper.get_queue(data["key"].split("-")[0])

@@ -75,10 +75,13 @@ dest_tracker_ui: https://tracker.yandex.ru   # необязательный; а�
    очередей — `users`, `user`, `author` в условиях и функциях переходов, `commentSummonees` и
    значения полей по умолчанию на экранах; в `issue_templates.yaml` и `comment_templates.yaml` —
    `owner`, `permissions.*.users`, пользователи в `fieldTemplates` и `checklistItems`,
-   `summonees`; в `boards.yaml` — пользователи в `autoFilters.addFilter.fieldValues`).
+   `summonees`; в `boards.yaml` — пользователи в `autoFilters.addFilter.fieldValues`; в
+   `queues/*/queue.yaml` — `permissions.*.users`, в том числе `permissions.deny.users`).
 2. Для каждого предложи строку `<как в data>:<логин в Трекере>`.
 3. Незамапленные значения уйдут в Трекер как есть и, скорее всего, не найдутся —
    надо замапить всех: можно маппить отсутствующих в какую-то заранее оговоренную учетку по умолчанию.
+   Исключение — `permissions.deny.users`: учётная запись по умолчанию окажется под запретом.
+   Пользователя из запрета, которого нет в целевой организации, уберите из выгрузки.
 
 **`groups.cfg` — так же, но для групп.** Выгрузка хранит группы названиями, импорт ищет их в
 целевой организации по названию. Если названия совпадают, сопоставлять ничего не нужно.

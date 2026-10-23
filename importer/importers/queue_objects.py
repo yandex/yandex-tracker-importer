@@ -5,7 +5,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
-from yandex_tracker_client.exceptions import BadRequest, NotFound, UnprocessableEntity
+from yandex_tracker_client.exceptions import BadRequest, Conflict, Forbidden, NotFound, UnprocessableEntity
 from yandex_tracker_client.objects import Resource
 
 from .base import CachedImporter, GetOrCreateImporter
@@ -20,7 +20,7 @@ from ..exceptions import (
 )
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
-from ..tracker_collections import run_version_action, update_workflow
+from ..tracker_collections import get_user_queue_permissions, run_version_action, update_workflow
 from ..utils import clean_empty, get_optional, prepare_field_value
 
 
@@ -421,12 +421,25 @@ class WorkflowImporter(GetOrCreateImporter):
         return "локальн" in text or "local field" in text
 
 
+# Снятие запрета доступа начинает действовать с задержкой до 15–20 с, а API прав сразу показывает
+# его снятым. Поэтому после снятия — пауза, а отказ в доступе повторяется
+DENY_LIFT_DELAY = 30
+FORBIDDEN_RETRY_DELAYS = (5, 10, 15, 30)
+
+
 class QueueImporter(GetOrCreateImporter):
     def __init__(self, client: TrackerClient, mapper: EntityMapper) -> None:
         super().__init__(client, mapper)
         self._group_resolver = GroupResolver(client, mapper)
         # до создания очередей: сбой позже оставил бы созданную очередь без прав
         self._group_resolver.load_groups()
+        # запрет доступа по ключу очереди, ставится в конце импорта
+        self._pending_deny = {}
+        # часть запрета, снятая на время импорта
+        self._lifted_deny = {}
+        # очереди, где отказ в доступе не прошёл за все повторы
+        self._forbidden_persists = set()
+        self._myself = None
 
     @property
     def object_name(self) -> str:
@@ -479,15 +492,14 @@ class QueueImporter(GetOrCreateImporter):
         except Exception:
             logger.exception(f"Error updating issue types config for queue {queue_obj.key}")
 
-    def _get_groups_ids(self, groups: List[Any], queue_key: str) -> set:
-        """Группа, которой нет в целевой организации, в права не попадает: доступ от этого
-        только сужается. Но молча такое не проходит — иначе права очереди тихо станут уже."""
+    def _get_groups_ids(self, groups: List[Any], queue_key: str, permission_type: str) -> set:
+        """Номера групп целевой организации. Ненайденная группа пропускается с предупреждением."""
         groups_ids = set()
         for group in groups:
             group_id = self._group_resolver.get_group_id(group)
             if group_id is None:
                 logger.warning(
-                    f"Group {group} is not found, it is skipped in permissions of queue {queue_key}: "
+                    f"Group {group} is not found, it is skipped in permissions of queue {queue_key} ({permission_type}): "
                     "check mapping/groups.cfg"
                 )
             else:
@@ -498,35 +510,27 @@ class QueueImporter(GetOrCreateImporter):
     def update_permissions(self, queue_obj: Resource, queue_data: Dict[str, Any]) -> None:
         """
         Добавить разрешения к очереди, сохранив существующие.
-        Удалить группу "Все сотрудники", если её нет в импортируемых данных, чтобы избежать общего доступа при первичном импорте очереди
+        Удалить группу "Все сотрудники", если её нет в импортируемых данных, чтобы избежать общего доступа при первичном импорте очереди.
+        Запрет доступа откладывается до конца импорта — см. `update_deny_permissions`.
         """
         incoming_permissions = queue_data.get("permissions")
         if not incoming_permissions:
             return
 
         permissions_changes = {}
-        permission_types = ["create", "read", "write", "grant"]
-        for permission_type in permission_types:
-            groups_add = self._get_groups_ids(
-                incoming_permissions.get(permission_type, {}).get("groups", []), queue_obj.key
+        for permission_type in ["create", "read", "write", "writeNoAssign", "grant"]:
+            if permission_type == "writeNoAssign" and permission_type not in incoming_permissions:
+                continue
+            permissions_changes[permission_type] = self._prepare_permission_changes(
+                incoming_permissions.get(permission_type) or {}, queue_obj.key, permission_type
             )
+            groups_add = permissions_changes[permission_type]["groups"]["add"]
+            if ALL_PARTICIPANTS_GROUP_ID not in groups_add:
+                permissions_changes[permission_type]["groups"]["remove"] = [ALL_PARTICIPANTS_GROUP_ID]
 
-            permissions_changes[permission_type] = {
-                "users": {
-                    "add": list({
-                        self._mapper.get_user(user)
-                        for user in incoming_permissions.get(permission_type, {}).get("users", [])
-                    }),
-                },
-                "roles": {
-                    "add": incoming_permissions.get(permission_type, {}).get("roles", []),
-                },
-                "groups": {
-                    "add": list(groups_add),
-                    # Удалять группу "Все сотрудники", если она не добавляется
-                    "remove": [ALL_PARTICIPANTS_GROUP_ID] if ALL_PARTICIPANTS_GROUP_ID not in groups_add else []
-                },
-            }
+        deny = clean_empty(self._prepare_permission_changes(incoming_permissions.get("deny") or {}, queue_obj.key, "deny"))
+        if deny:
+            self._pending_deny[queue_obj.key] = deny
 
         permissions_changes = clean_empty(permissions_changes)
         if not permissions_changes:
@@ -540,6 +544,135 @@ class QueueImporter(GetOrCreateImporter):
                 f"Error updating permissions for queue {queue_obj.key} "
                 f"with data: {permissions_changes}"
             )
+
+    def lift_deny(self, queue_key: str) -> None:
+        """Снимает с очереди субъекты запрета из выгрузки, через которые запрет действует на
+        учётную запись импорта: под запретом она не видит версий и задач очереди. Возвращает их
+        `update_deny_permissions`. Если запрет действует и через субъекты не из выгрузки, ничего
+        не снимается, в журнал пишется ошибка. После снятия — пауза `DENY_LIFT_DELAY`."""
+        # без запрета в выгрузке права тоже проверяются, чтобы сообщить о ручном запрете
+        deny = self._pending_deny.get(queue_key) or {}
+        try:
+            if self._myself is None:
+                self._myself = self._client.myself
+            myself = self._myself
+            applied = (get_user_queue_permissions(self._client, queue_key, myself.uid).get("permissions") or {}).get("DENY")
+            if not applied:
+                return
+            lifted = {}
+            not_in_dump = []
+            for kind in ("users", "groups", "roles"):
+                applied_ids = self._subject_ids(applied.get(kind))
+                for item in deny.get(kind, {}).get("add", []):
+                    keys = self._user_keys(item) if kind == "users" else {str(item)}
+                    subject_id = next((applied_ids[key] for key in keys if key in applied_ids), None)
+                    if subject_id is not None:
+                        lifted.setdefault(kind, []).append(subject_id)
+                not_in_dump += [
+                    f"{kind} {subject_id}" for subject_id in set(applied_ids.values()) - set(lifted.get(kind, []))
+                ]
+            if not_in_dump:
+                logger.error(
+                    f"Access to queue {queue_key} is denied to the import account by a deny permission that is not "
+                    f"in the dump ({', '.join(sorted(map(str, not_in_dump)))}): remove the account from it to import "
+                    "issues and versions of the queue"
+                )
+                return
+            if not lifted:
+                return
+            # запоминается до запроса, чтобы вернуть запрет и при потерянном ответе
+            self._lifted_deny[queue_key] = lifted
+            self._client.queues[queue_key].update_permissions(
+                {"deny": {kind: {"remove": ids} for kind, ids in lifted.items()}}
+            )
+            logger.warning(
+                f"Deny permission of queue {queue_key} is lifted for the import account while importing, it is set "
+                "again at the end: if the import is interrupted, run it again"
+            )
+        except Forbidden:
+            # права очереди доступны только с правом на её настройки
+            logger.warning(f"Permissions of queue {queue_key} are not available to the import account, its deny is not checked")
+        except Exception:
+            logger.exception(f"Error lifting deny permission of queue {queue_key}")
+        if queue_key in self._lifted_deny:
+            time.sleep(DENY_LIFT_DELAY)
+
+    def retry_forbidden(self, queue_key: str, request: Callable[[], Any], on_retry: Callable[[], Any] = None) -> Any:
+        """Выполняет запрос к очереди; если её запрет снят, отказ в доступе повторяется с паузами
+        `FORBIDDEN_RETRY_DELAYS`. Перед повтором вызывается `on_retry`; если он вернул объект,
+        возвращается этот объект. После окончательного отказа повторы в очереди отключаются."""
+        retry = queue_key in self._lifted_deny and queue_key not in self._forbidden_persists
+        for delay in FORBIDDEN_RETRY_DELAYS if retry else ():
+            try:
+                return request()
+            except Forbidden:
+                logger.warning(f"Access to queue {queue_key} is denied, retrying in {delay} s: the lifted deny permission may still apply")
+                time.sleep(delay)
+                if on_retry is not None:
+                    try:
+                        found = on_retry()
+                    except Forbidden:
+                        continue
+                    if found is not None:
+                        return found
+        try:
+            return request()
+        except Forbidden:
+            if retry:
+                self._forbidden_persists.add(queue_key)
+            raise
+
+    @staticmethod
+    def _subject_ids(subjects: Any) -> Dict[str, Any]:
+        """Номер субъекта по каждому из его идентификаторов (`id`, `uid`, `passportUid`, …)."""
+        return {
+            str(get_optional(subject, key)): get_optional(subject, "id")
+            for subject in subjects or []
+            for key in ("id", "uid", "passportUid", "cloudUid", "trackerUid")
+            if get_optional(subject, key) is not None
+        }
+
+    def _user_keys(self, user: Any) -> set:
+        """Идентификаторы пользователя из users.cfg; логин переводится в номера запросом."""
+        if str(user).isdigit():
+            return {str(user)}
+        user_obj = self._client.users.get(user)
+        return {
+            str(get_optional(user_obj, key))
+            for key in ("id", "uid", "passportUid", "cloudUid", "trackerUid", "login")
+            if get_optional(user_obj, key) is not None
+        }
+
+    def update_deny_permissions(self) -> None:
+        """Ставит запрет из выгрузки отдельным запросом, чтобы его ошибка не мешала остальным
+        правам. Снятая часть запрета возвращается ещё одним запросом, до полного."""
+        for queue_key, deny in self._pending_deny.items():
+            lifted = self._lifted_deny.get(queue_key)
+            if lifted:
+                try:
+                    self._client.queues[queue_key].update_permissions(
+                        {"deny": {kind: {"add": ids} for kind, ids in lifted.items()}}
+                    )
+                except Exception:
+                    logger.exception(
+                        f"Error restoring lifted deny permission of queue {queue_key}: {lifted}, set it manually"
+                    )
+            try:
+                self._client.queues[queue_key].update_permissions({"deny": deny})
+                logger.info(f"Successfully updated deny permission for queue {queue_key}")
+            except Exception:
+                logger.exception(
+                    f"Error updating deny permission for queue {queue_key} with data: {deny}, set it manually"
+                )
+        self._pending_deny = {}
+        self._lifted_deny = {}
+
+    def _prepare_permission_changes(self, permission: Dict[str, Any], queue_key: str, permission_type: str) -> Dict[str, Any]:
+        return {
+            "users": {"add": list({self._mapper.get_user(user) for user in permission.get("users", [])})},
+            "roles": {"add": permission.get("roles", [])},
+            "groups": {"add": list(self._get_groups_ids(permission.get("groups", []), queue_key, permission_type))},
+        }
 
 
 class ComponentImporter(CachedImporter):
@@ -584,9 +717,20 @@ class ComponentImporter(CachedImporter):
 
 
 class VersionImporter(CachedImporter):
-    def __init__(self, client: TrackerClient, mapper: EntityMapper, queue_obj: Resource) -> None:
+    def __init__(
+        self,
+        client: TrackerClient,
+        mapper: EntityMapper,
+        queue_obj: Resource,
+        retry_forbidden: Callable[[Callable[[], Any], Callable[[], Any]], Any] = lambda request, on_retry: request(),
+    ) -> None:
         super().__init__(client, mapper)
         self._queue_obj = queue_obj
+        # повтор отказа в доступе у очереди со снятым запретом
+        self._retry_forbidden = retry_forbidden
+        self._load_versions()
+
+    def _load_versions(self) -> None:
         for version in self._queue_obj.versions:
             self._put_to_cache("{}-{}".format(version.queue.key, version.name), version)
 
@@ -617,7 +761,19 @@ class VersionImporter(CachedImporter):
         })
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
-        return self._client.versions.create(**prepared_data)
+        def find_created() -> Optional[Resource]:
+            # под запретом список версий пуст
+            self._load_versions()
+            return self.get_from_cache(f"{self._queue_obj.key}-{prepared_data['name']}")
+
+        try:
+            return self._retry_forbidden(lambda: self._client.versions.create(**prepared_data), find_created)
+        except Conflict:
+            # версия есть, но список читался под запретом
+            found = find_created()
+            if found is None:
+                raise
+            return found
 
     def update_settings(self, input_data: Dict[str, Any]) -> None:
         """Следующая версия, выпуск и архив задаются, когда созданы все версии очереди: следующая
@@ -660,7 +816,7 @@ class VersionImporter(CachedImporter):
 
         for step, run in steps:
             try:
-                run()
+                self._retry_forbidden(run, None)
             except Exception:
                 logger.exception(
                     f"Error setting {step} of version {input_data['name']} of queue {self._queue_obj.key}"
