@@ -1,4 +1,5 @@
-"""Коллекции Трекера, которых нет в клиенте: дашборды и виджеты.
+"""Коллекции и методы API Трекера, которых нет в клиенте или которые клиент вызывает не со всеми
+полями.
 
 Клиент регистрирует любой класс-наследник `Collection` по его пути, поэтому объявленные здесь
 коллекции работают как встроенные: ответы разбираются в ресурсы с объявленными полями, а запросы
@@ -116,6 +117,12 @@ def update_template_permissions(collection: Any, path: str, template_id: Any, ve
         params={"version": version},
         data=data,
     )
+
+
+def create_checklist_item(checklist_items: Collection, data: Dict[str, Any]):
+    """Создаёт пункт чеклиста задачи или сущности со всеми полями `prepare_checklist_item_data`:
+    `create` клиента не принимает ключ `checklistItemType`, а для сущностей — и `url`."""
+    return Collection.create(checklist_items, **data)
 
 
 def create_live_board(client: TrackerClient, data: Dict[str, Any]):

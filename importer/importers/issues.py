@@ -16,6 +16,7 @@ from ..link_collectors import IssueLinksCollector
 from ..exceptions import LocalFieldNotExistsError
 from ..mapper import EntityMapper
 from ..text_normalizer import TextNormalizer
+from ..tracker_collections import create_checklist_item
 from ..utils import (
     datetime_to_str,
     str_to_datetime,
@@ -305,7 +306,7 @@ class IssueImporter(GetOrCreateImporter):
                 continue
 
             try:
-                issue_obj.checklist_items.create(**prepared_data)
+                create_checklist_item(issue_obj.checklist_items, prepared_data)
             except Exception:
                 logger.exception(f"Error creating checklist item for issue {issue_obj.key} with data: {prepared_data}")
 

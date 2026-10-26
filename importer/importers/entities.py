@@ -13,6 +13,7 @@ from ..groups import GroupResolver
 from ..link_collectors import EntityLinksCollector
 from ..mapper import EntityMapper
 from ..text_normalizer import TextNormalizer
+from ..tracker_collections import create_checklist_item
 from ..utils import clean_empty, prepare_checklist_item_data
 
 
@@ -267,7 +268,7 @@ class EntityImporter(CachedImporter, ABC):
                 continue
 
             try:
-                entity_obj.checklist_items.create(**prepared_data)
+                create_checklist_item(entity_obj.checklist_items, prepared_data)
             except Exception:
                 logger.exception(
                     f"Error creating checklist item for entity {summary} with data: {prepared_data}"
