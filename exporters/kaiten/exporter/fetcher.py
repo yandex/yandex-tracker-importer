@@ -23,7 +23,6 @@ class KaitenDataFetcher:
         self._client = client
         self._max_workers = max_workers or os.cpu_count()
         self._users_by_id: Dict[Any, Dict[str, Any]] = {}
-        self._card_types_by_id: Dict[Any, Dict[str, Any]] = {}
         self._sprints_by_id: Dict[Any, Dict[str, Any]] = {}
         self._current_user: Optional[Dict[str, Any]] = None
 
@@ -31,7 +30,6 @@ class KaitenDataFetcher:
 
     def preload_reference_data(self) -> None:
         self._users_by_id = {user["id"]: user for user in self.fetch_users()}
-        self._card_types_by_id = {ct["id"]: ct for ct in self.fetch_card_types()}
         self._current_user = self.fetch_current_user()
 
     def fetch_current_user(self) -> Optional[Dict[str, Any]]:
@@ -80,9 +78,6 @@ class KaitenDataFetcher:
 
     def resolve_user(self, user_id: Any) -> Optional[Dict[str, Any]]:
         return self._users_by_id.get(user_id)
-
-    def resolve_card_type(self, type_id: Any) -> Optional[Dict[str, Any]]:
-        return self._card_types_by_id.get(type_id)
 
     def preload_sprints(self, board_id: str) -> None:
         try:

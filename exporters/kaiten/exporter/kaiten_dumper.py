@@ -1,8 +1,10 @@
 import logging
 import os
+import re
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .dumpers import (
     BoardToProjectDumper,
@@ -22,7 +24,7 @@ from .dump_results import (
 )
 from .fetcher import KaitenDataFetcher
 from .kaiten_client import SimpleKaitenClient
-from .utils import dump_to_yaml, title_to_key
+from .utils import dump_to_yaml, issue_types_by_card_type_id
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ class KaitenDumper:
 
         self._board_to_queue_dumper = BoardToQueueDumper(self._card_types, self._custom_properties)
         self._board_to_project_dumper = BoardToProjectDumper()
-        self._card_dumper = CardDumper(client, self._fetcher, self._custom_properties)
+        self._card_dumper = CardDumper(client, self._fetcher, self._custom_properties, self._card_types)
         self._lane_values: set = set()
 
     def dump(self) -> Iterator[BoardDumpResult]:
@@ -63,10 +65,14 @@ class KaitenDumper:
             )
 
             queue_dump_path = os.path.join(self._data_path, "queues", queue_key)
-            self._board_to_queue_dumper.dump(board, queue_dump_path, queue_key=queue_key, lead=lead)
+            status_by_column_id = self._board_to_queue_dumper.dump(
+                board, queue_dump_path, queue_key=queue_key, lead=lead
+            )
 
-            project_dump_path = os.path.join(self._data_path, "projects", board.get("title", "UNKNOWN"))
-            self._board_to_project_dumper.dump(board, project_dump_path)
+            # a title is not unique across spaces and may contain a path separator
+            project_dir = re.sub(r"[\\/]", "_", f"{board.get('title') or 'board'}_{board_id}")
+            project_dump_path = os.path.join(self._data_path, "projects", project_dir)
+            self._board_to_project_dumper.dump(board, project_dump_path, created_by=lead)
 
             # Swimlanes only carry meaning when a board has more than one lane.
             lane_titles = [lane.get("title") for lane in board.get("lanes", []) if lane.get("title")]
@@ -74,12 +80,16 @@ class KaitenDumper:
             if lane_field_active:
                 self._lane_values.update(lane_titles)
 
-            card_results = self._dump_board_cards(board_id, queue_dump_path, queue_key, lane_field_active)
+            card_results = self._dump_board_cards(
+                board_id, queue_dump_path, queue_key, lane_field_active, status_by_column_id
+            )
             return BoardDumpSuccess(board_id, queue_key, card_results)
         except Exception as exc:
             return BoardDumpError(board_id, exc)
 
-    def _dump_board_cards(self, board_id: str, queue_path: str, queue_key: str, lane_field_active: bool) -> List[CardDumpResult]:
+    def _dump_board_cards(
+        self, board_id: str, queue_path: str, queue_key: str, lane_field_active: bool, status_by_column_id: Dict[Any, str]
+    ) -> List[CardDumpResult]:
         cards = sorted(
             self._fetcher.fetch_cards_for_board(board_id),
             key=lambda card: card.get("created") or datetime.now().isoformat(),
@@ -88,6 +98,13 @@ class KaitenDumper:
         # Assign issue keys up front so card relations (children/parents) can be
         # resolved to keys while dumping.
         key_by_card_id = {card["id"]: f"{queue_key}-{num}" for num, card in enumerate(cards, start=1)}
+        created_at_by_card_id = {card["id"]: card.get("created") for card in cards}
+        related_card_ids = defaultdict(set)
+        for card in cards:
+            for target_id, _ in CardDumper.link_targets(card):
+                if target_id in key_by_card_id:
+                    related_card_ids[card["id"]].add(target_id)
+                    related_card_ids[target_id].add(card["id"])
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             futures = [
@@ -97,18 +114,33 @@ class KaitenDumper:
                     queue_path=queue_path,
                     issue_key=key_by_card_id[card["id"]],
                     key_by_card_id=key_by_card_id,
+                    created_at_by_card_id=created_at_by_card_id,
+                    related_card_ids=related_card_ids[card["id"]],
+                    status_by_column_id=status_by_column_id,
                     lane_field_active=lane_field_active,
                 )
                 for card in cards
             ]
             return [future.result() for future in futures]
 
-    def _dump_single_card(self, card: dict, issue_key: str, queue_path: str, key_by_card_id: dict, lane_field_active: bool) -> CardDumpResult:
+    def _dump_single_card(
+        self,
+        card: dict,
+        issue_key: str,
+        queue_path: str,
+        key_by_card_id: dict,
+        created_at_by_card_id: dict,
+        related_card_ids: set,
+        status_by_column_id: dict,
+        lane_field_active: bool,
+    ) -> CardDumpResult:
         try:
             dump_path = os.path.join(queue_path, issue_key)
             self._card_dumper.dump(
                 card, dump_path, issue_key=issue_key,
-                key_by_card_id=key_by_card_id, lane_field_active=lane_field_active,
+                key_by_card_id=key_by_card_id, created_at_by_card_id=created_at_by_card_id,
+                related_card_ids=related_card_ids,
+                status_by_column_id=status_by_column_id, lane_field_active=lane_field_active,
             )
             return CardDumpSuccess(card["id"], issue_key)
         except Exception as exc:
@@ -118,8 +150,8 @@ class KaitenDumper:
         dump_path = os.path.join(self._data_path, "statuses.yaml")
         dump_to_yaml(
             [
-                {"key": key, "name": {"en": name, "ru": name}}
-                for key, name in self._board_to_queue_dumper.collected_statuses.items()
+                {"key": key, "name": {"en": status["name"], "ru": status["name"]}, "type": status["type"]}
+                for key, status in self._board_to_queue_dumper.collected_statuses.items()
             ],
             dump_path,
         )
@@ -127,12 +159,10 @@ class KaitenDumper:
     def _dump_issue_types(self) -> None:
         types = []
         seen = set()
-        for card_type in self._card_types:
-            key = title_to_key(card_type.get("name"))
-            if not key or key in seen:
+        for key, name in issue_types_by_card_type_id(self._card_types).values():
+            if key in seen:
                 continue
             seen.add(key)
-            name = card_type.get("name")
             types.append({"key": key, "name": {"en": name, "ru": name}})
         if types:
             dump_to_yaml(types, os.path.join(self._data_path, "issue_types.yaml"))

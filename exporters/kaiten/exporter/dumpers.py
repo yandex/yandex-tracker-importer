@@ -2,14 +2,18 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .fetcher import KaitenDataFetcher
 from .kaiten_client import SimpleKaitenClient
 from .utils import (
+    KeyAllocator,
+    NameAllocator,
     dump_to_yaml,
+    issue_type_keys,
+    latest_tracker_datetime,
+    local_fields_by_property_id,
     prepare_attachment_filename,
-    title_to_key,
     to_tracker_date,
     to_tracker_datetime,
 )
@@ -71,10 +75,12 @@ class BoardToProjectDumper(BaseDumper):
     def _filename(self) -> str:
         return "project.yaml"
 
-    def dump(self, board: Dict[str, Any], dump_path: str) -> None:
+    def dump(self, board: Dict[str, Any], dump_path: str, created_by: Optional[str] = None) -> None:
         prepared_data = {
             "id": board.get("id"),
             "summary": board.get("title"),
+            "createdAt": to_tracker_datetime(board.get("created")),
+            "createdBy": created_by,
             "teamAccess": self._STANDARD_TEAM_ACCESS,
             "description": board.get("description"),
         }
@@ -86,25 +92,36 @@ class BoardToQueueDumper(BaseDumper):
     _STANDARD_DEFAULT_TYPE = "task"
     _STANDARD_DEFAULT_PRIORITY = "normal"
 
+    # Kaiten column type -> Tracker status type
+    _STATUS_TYPES = {1: "new", 2: "inProgress", 3: "done"}
+
     def __init__(self, card_types: List[Dict[str, Any]], custom_properties: List[Dict[str, Any]]):
-        self._card_types = card_types
         self._custom_properties = custom_properties
-        self._collected_statuses: Dict[str, str] = {}
+        self._type_keys = issue_type_keys(card_types)
+        self._local_fields = local_fields_by_property_id(custom_properties)
+        # statuses are global: one status per name across all boards; `resolved` is the final step
+        # of every workflow
+        self._collected_statuses: Dict[str, Dict[str, Any]] = {}
+        self._status_keys = KeyAllocator(reserved=["resolved"])
+        self._status_names = NameAllocator()
 
     @property
     def _filename(self) -> str:
         return "queue.yaml"
 
     @property
-    def collected_statuses(self) -> Dict[str, str]:
+    def collected_statuses(self) -> Dict[str, Dict[str, Any]]:
+        """Status key -> ``{"name": ..., "type": ...}``."""
         return self._collected_statuses
 
-    def dump(self, board: Dict[str, Any], dump_path: str, queue_key: str, lead: Optional[str]) -> None:
-        board_statuses = {
-            title_to_key(column["title"]): column.get("title")
-            for column in self._sorted_columns(board)
-            if column.get("title")
-        }
+    def dump(self, board: Dict[str, Any], dump_path: str, queue_key: str, lead: Optional[str]) -> Dict[Any, str]:
+        """Dumps the queue and returns the status key of every column and subcolumn by its id."""
+        status_by_column_id: Dict[Any, str] = {}
+        board_statuses: Dict[str, str] = {}
+        for column, name, status_type in self._status_columns(board):
+            key = self._status_key(name, column, status_type)
+            status_by_column_id[column.get("id")] = key
+            board_statuses.setdefault(key, name)
 
         prepared_data = {
             "key": queue_key,
@@ -119,13 +136,48 @@ class BoardToQueueDumper(BaseDumper):
         }
 
         self._clean_and_save_data(prepared_data, dump_path)
-        self._collected_statuses.update(board_statuses)
+        return status_by_column_id
 
-    def _sorted_columns(self, board: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Kaiten may nest sub-columns; a flat, sort_order-ordered list of leaf columns
-        # gives the workflow steps in board order.
-        columns = board.get("columns", [])
-        return sorted(columns, key=lambda c: c.get("sort_order", 0))
+    def _status_columns(self, board: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str, str]]:
+        """Columns that hold cards, in board order, with status names and types. A column with
+        subcolumns holds cards only in the subcolumns; a subcolumn is named after its column and
+        without a type of its own takes the type of its column."""
+        result = []
+        for column in self._by_sort_order(board.get("columns") or []):
+            column_name = self._column_name(column)
+            column_type = self._STATUS_TYPES.get(column.get("type"))
+            subcolumns = self._by_sort_order(column.get("subcolumns") or [])
+            if not subcolumns:
+                result.append((column, column_name, self._status_type(column_type, column_name)))
+            for subcolumn in subcolumns:
+                name = f"{column_name} / {self._column_name(subcolumn)}"
+                subcolumn_type = self._STATUS_TYPES.get(subcolumn.get("type")) or column_type
+                result.append((subcolumn, name, self._status_type(subcolumn_type, name)))
+        return result
+
+    @staticmethod
+    def _status_type(status_type: Optional[str], name: str) -> str:
+        if status_type is None:
+            logger.warning(f"Column {name} has no known type, its status is exported as inProgress")
+            return "inProgress"
+        return status_type
+
+    @staticmethod
+    def _by_sort_order(columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(columns, key=lambda c: c.get("sort_order") or 0)
+
+    @staticmethod
+    def _column_name(column: Dict[str, Any]) -> str:
+        return (column.get("title") or "").strip() or f"Колонка {column.get('id')}"
+
+    def _status_key(self, column_name: str, column: Dict[str, Any], status_type: str) -> str:
+        name = self._status_names.name(column_name)
+        key = self._status_keys.key(name, f"column{column.get('id')}")
+        status = self._collected_statuses.setdefault(key, {"name": name, "type": status_type})
+        if status["type"] != status_type:
+            # a status name is unique in Tracker: columns with one name share one status
+            logger.warning(f"Columns {name} have different types, the status type is {status['type']}")
+        return key
 
     def _get_workflow_key(self, queue_key: str) -> str:
         return f"W_{queue_key}"
@@ -134,9 +186,8 @@ class BoardToQueueDumper(BaseDumper):
         workflow = self._get_workflow_key(queue_key)
         type_keys = {self._STANDARD_DEFAULT_TYPE}
         config = [{"issueType": self._STANDARD_DEFAULT_TYPE, "workflow": workflow}]
-        for card_type in self._card_types:
-            key = title_to_key(card_type.get("name"))
-            if key and key not in type_keys:
+        for key in self._type_keys.values():
+            if key not in type_keys:
                 type_keys.add(key)
                 config.append({"issueType": key, "workflow": workflow})
         return config
@@ -159,7 +210,8 @@ class BoardToQueueDumper(BaseDumper):
                 "key": self._get_workflow_key(queue_key),
                 "name": f"Рабочий процесс очереди \"{board_name}\"",
                 "type": "visual",
-                "initialAction": {"name": {"ru": "Не задано", "en": "Undefined"}, "target": "resolved"},
+                # new issues start in the first column of the board
+                "initialAction": {"name": {"ru": "Не задано", "en": "Undefined"}, "target": steps[0]["status"]},
                 "steps": steps,
             }
         ]
@@ -167,13 +219,13 @@ class BoardToQueueDumper(BaseDumper):
     def _prepare_local_fields(self) -> List[Dict[str, Any]]:
         result = []
         for prop in self._custom_properties:
-            key = title_to_key(prop.get("name"))
-            if not key:
+            if prop["id"] not in self._local_fields:
                 continue
+            key, name = self._local_fields[prop["id"]]
             result.append({
                 "category": CATEGORY_NAME["ru"],
                 "key": key,
-                "name": {"en": prop.get("name"), "ru": prop.get("name")},
+                "name": {"en": name, "ru": name},
                 "schema": self._get_field_schema(prop),
                 "optionsProvider": self._get_field_options(prop),
             })
@@ -218,10 +270,18 @@ class CardDumper(BaseDumper):
     _STANDARD_TYPE = "task"
     _STANDARD_PRIORITY = "normal"
 
-    def __init__(self, client: SimpleKaitenClient, fetcher: KaitenDataFetcher, custom_properties: List[Dict[str, Any]]):
+    def __init__(
+        self,
+        client: SimpleKaitenClient,
+        fetcher: KaitenDataFetcher,
+        custom_properties: List[Dict[str, Any]],
+        card_types: List[Dict[str, Any]],
+    ):
         self._client = client
         self._fetcher = fetcher
         self._properties_by_id = {prop["id"]: prop for prop in custom_properties}
+        self._type_keys = issue_type_keys(card_types)
+        self._local_fields = local_fields_by_property_id(custom_properties)
 
     @property
     def _filename(self) -> str:
@@ -233,20 +293,26 @@ class CardDumper(BaseDumper):
         dump_path: str,
         issue_key: str,
         key_by_card_id: Optional[Dict[Any, str]] = None,
+        created_at_by_card_id: Optional[Dict[Any, Any]] = None,
+        related_card_ids: Iterable[Any] = (),
+        status_by_column_id: Optional[Dict[Any, str]] = None,
         lane_field_active: bool = False,
     ) -> None:
-        column = self._card_column(card)
-        card_type = self._fetcher.resolve_card_type(card.get("type_id"))
+        created_at_by_card_id = created_at_by_card_id or {}
+        created_by = self._prepare_user(card.get("owner") or self._fetcher.resolve_user(card.get("owner_id")))
 
         prepared_data = {
             "key": issue_key,
             "summary": card.get("title"),
             "createdAt": to_tracker_datetime(card.get("created")),
-            "createdBy": self._prepare_user(card.get("owner") or self._fetcher.resolve_user(card.get("owner_id"))),
-            "updatedAt": to_tracker_datetime(card.get("updated")),
-            "type": title_to_key(card_type.get("name")) if card_type else self._STANDARD_TYPE,
+            "createdBy": created_by,
+            "updatedAt": self._prepare_updated_at(
+                card, [created_at_by_card_id.get(card_id) for card_id in related_card_ids]
+            ),
+            "updatedBy": self._prepare_user(self._fetcher.resolve_user(card.get("updater_id"))) or created_by,
+            "type": self._type_keys.get(card.get("type_id"), self._STANDARD_TYPE),
             "priority": self._STANDARD_PRIORITY,
-            "status": title_to_key(column.get("title")) if column else None,
+            "status": self._prepare_status(card, status_by_column_id or {}),
             "description": self._prepare_description(card),
             "deadline": to_tracker_date(card.get("due_date")),
             "tags": self._prepare_tags(card),
@@ -257,7 +323,7 @@ class CardDumper(BaseDumper):
             "attachments": self._prepare_attachments(card.get("files", [])),
             "worklogs": self._prepare_worklogs(card.get("time_logs", [])),
             "storyPoints": card.get("size"),
-            "links": self._prepare_links(card, key_by_card_id or {}),
+            "links": self._prepare_links(card, key_by_card_id or {}, created_at_by_card_id, created_by),
             "project": {"primary": card.get("board_id")},
             **self._prepare_local_fields(card),
         }
@@ -270,12 +336,24 @@ class CardDumper(BaseDumper):
         self._download_attachments(card.get("files", []), dump_path)
         self._clean_and_save_data(prepared_data, dump_path)
 
-    def _card_column(self, card: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # A trimmed card carries only column_id; the full card usually embeds
-        # ``column`` with its title. Prefer the embedded object.
-        if card.get("column"):
-            return card["column"]
-        return {"title": card.get("column_title")} if card.get("column_title") else None
+    def _prepare_status(self, card: Dict[str, Any], status_by_column_id: Dict[Any, str]) -> Optional[str]:
+        # ``column`` of a card in a subcolumn is the subcolumn
+        column_id = (card.get("column") or {}).get("id", card.get("column_id"))
+        status = status_by_column_id.get(column_id)
+        if status is None:
+            logger.warning(
+                f"Card {card.get('id')} is in column {column_id} missing from its board, the status is not exported"
+            )
+        return status
+
+    def _prepare_updated_at(self, card: Dict[str, Any], related_created_at: List[Any]) -> Optional[str]:
+        """The latest date of the card, its comments, files, time logs and related cards."""
+        dates = [card.get("created"), card.get("updated"), *related_created_at]
+        for comment in card.get("comments") or []:
+            dates += [comment.get("created"), comment.get("updated")]
+        dates += [file.get("created") for file in card.get("files") or []]
+        dates += [log.get("created") for log in card.get("time_logs") or []]
+        return latest_tracker_datetime(dates)
 
     def _prepare_assignee(self, card: Dict[str, Any]) -> Optional[str]:
         # Kaiten members carry a ``type`` (2 == responsible/assignee, 1 == member).
@@ -365,21 +443,37 @@ class CardDumper(BaseDumper):
             result.append(att)
         return result
 
-    def _prepare_links(self, card: Dict[str, Any], key_by_card_id: Dict[Any, str]) -> List[Dict[str, Any]]:
-        # Kaiten parent/child relations. Emit one direction (parent -> child) only;
-        # the importer creates the reciprocal link. Cross-board relations whose
-        # counterpart isn't in this export are skipped.
+    @staticmethod
+    def link_targets(card: Dict[str, Any]) -> List[Tuple[Any, str]]:
+        """Parent/child relations and active blockers of a card, one direction only: the importer
+        creates the reciprocal link."""
+        targets = [(child_id, "is parent task for") for child_id in card.get("children_ids") or []]
+        targets += [
+            (blocker.get("blocker_card_id"), "depends on")
+            for blocker in card.get("blockers") or []
+            if not blocker.get("released")
+        ]
+        return targets
+
+    def _prepare_links(
+        self,
+        card: Dict[str, Any],
+        key_by_card_id: Dict[Any, str],
+        created_at_by_card_id: Dict[Any, Any],
+        created_by: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        # relations to cards outside the export are skipped
         links = []
-        for child_id in card.get("children_ids") or []:
-            key = key_by_card_id.get(child_id)
+        for card_id, relationship in self.link_targets(card):
+            key = key_by_card_id.get(card_id)
             if key:
-                links.append({"issue": key, "relationship": "is parent task for"})
-        for blocker in card.get("blockers") or []:
-            if blocker.get("released"):
-                continue
-            key = key_by_card_id.get(blocker.get("blocker_card_id"))
-            if key:
-                links.append({"issue": key, "relationship": "depends on"})
+                links.append({
+                    "issue": key,
+                    "relationship": relationship,
+                    # Kaiten keeps no relation date: a link is dated by the later of its cards
+                    "createdAt": latest_tracker_datetime([card.get("created"), created_at_by_card_id.get(card_id)]),
+                    "createdBy": created_by,
+                })
         return links
 
     def _prepare_worklogs(self, time_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -406,9 +500,9 @@ class CardDumper(BaseDumper):
                 # value a card can carry; a miss means an unexpected property scope.
                 logger.warning(f"Card {card.get('id')} has value for unknown custom property {raw_key}")
                 continue
-            key = title_to_key(prop.get("name"))
-            if not key:
+            if prop_id not in self._local_fields:
                 continue
+            key, _ = self._local_fields[prop_id]
             local_fields[f"local_{key}"] = self._resolve_property_value(prop, raw_value)
         return local_fields
 
