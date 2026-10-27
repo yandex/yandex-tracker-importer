@@ -65,7 +65,7 @@ docker run --rm -v "$(pwd)":/work -w /work kaiten-exporter:latest
 
 - `data/queues/<KEY>/queue.yaml` — очередь, статусы, воркфлоу, локальные поля;
 - `data/queues/<KEY>/<KEY>-N/issue.yaml` — задачи (рядом `attachments/`);
-- `data/{statuses,issue_types,categories,global_fields}.yaml` — общие справочники.
+- `data/{statuses,resolutions,issue_types,categories,global_fields,boards}.yaml` — общие справочники и доски.
 
 Открой пару `issue.yaml` и убедись, что `summary`/`status`/`assignee`/`comments`
 выглядят осмысленно.
@@ -82,7 +82,7 @@ docker run --rm -v "$(pwd)":/work -w /work kaiten-exporter:latest
 - `queues.cfg` — ключи очередей из `boards.cfg`;
 - `statuses.cfg`, `issue_types.cfg` — ключи из `data/statuses.yaml` и
   `data/issue_types.yaml`;
-- `resolutions.cfg` — пустой: резолюций выгрузка не содержит.
+- `resolutions.cfg` — ключи из `data/resolutions.yaml` (резолюция `fixed` у завершённых задач).
 
 Формат строки — `<ключ в выгрузке>:<ключ в Трекере>`. Строка нужна только для
 ключа, который в Трекере другой; сами файлы обязательны. Дальнейшие детали — в

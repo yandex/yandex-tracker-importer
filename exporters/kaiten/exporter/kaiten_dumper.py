@@ -14,6 +14,8 @@ from .dumpers import (
     CATEGORY_NAME,
     LANE_FIELD_KEY,
     LANE_FIELD_NAME,
+    RESOLUTION_KEY,
+    RESOLUTION_NAME,
 )
 from .dump_results import (
     BoardDumpError,
@@ -55,6 +57,7 @@ class KaitenDumper:
             yield self._dump_board(board_id, queue_key)
         self._dump_boards()
         self._dump_statuses()
+        self._dump_resolutions()
         self._dump_issue_types()
         self._dump_global_fields()
         self._dump_category()
@@ -214,6 +217,9 @@ class KaitenDumper:
             }
         ]
         dump_to_yaml(fields, os.path.join(self._data_path, "global_fields.yaml"))
+
+    def _dump_resolutions(self) -> None:
+        dump_to_yaml([{"key": RESOLUTION_KEY, "name": RESOLUTION_NAME}], os.path.join(self._data_path, "resolutions.yaml"))
 
     def _dump_category(self) -> None:
         STANDARD_ORDER_CATEGORY = 1

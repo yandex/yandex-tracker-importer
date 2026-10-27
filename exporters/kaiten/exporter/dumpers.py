@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = {"en": "Kaiten", "ru": "Kaiten"}
 
+# resolution of done cards
+RESOLUTION_KEY = "fixed"
+RESOLUTION_NAME = {"en": "Fixed", "ru": "Решён"}
+
 # Kaiten swimlanes have no Tracker equivalent. When a board has more than one lane
 # we carry each card's lane as a GLOBAL field (key is kaiten-prefixed to avoid
 # clashing with existing Tracker fields), so tasks can be grouped by it.
@@ -145,8 +149,8 @@ class BoardToQueueDumper(BaseDumper):
 
     def _status_columns(self, board: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str, str]]:
         """Columns that hold cards, in board order, with status names and types. A column with
-        subcolumns holds cards only in the subcolumns; a subcolumn is named after its column and
-        without a type of its own takes the type of its column."""
+        subcolumns holds cards only in the subcolumns. A subcolumn is named and typed after its column:
+        Kaiten sets the state of a card by the top-level column."""
         result = []
         for column in self._by_sort_order(board.get("columns") or []):
             column_name = self._column_name(column)
@@ -156,8 +160,7 @@ class BoardToQueueDumper(BaseDumper):
                 result.append((column, column_name, self._status_type(column_type, column_name)))
             for subcolumn in subcolumns:
                 name = f"{column_name} / {self._column_name(subcolumn)}"
-                subcolumn_type = self._STATUS_TYPES.get(subcolumn.get("type")) or column_type
-                result.append((subcolumn, name, self._status_type(subcolumn_type, name)))
+                result.append((subcolumn, name, self._status_type(column_type, name)))
         return result
 
     @staticmethod
@@ -213,11 +216,12 @@ class BoardToQueueDumper(BaseDumper):
     def _prepare_issue_types_config(self, queue_key: str) -> List[Dict[str, Any]]:
         workflow = self._get_workflow_key(queue_key)
         type_keys = {self._STANDARD_DEFAULT_TYPE}
-        config = [{"issueType": self._STANDARD_DEFAULT_TYPE, "workflow": workflow}]
+        resolutions = [RESOLUTION_KEY]
+        config = [{"issueType": self._STANDARD_DEFAULT_TYPE, "workflow": workflow, "resolutions": resolutions}]
         for key in self._type_keys.values():
             if key not in type_keys:
                 type_keys.add(key)
-                config.append({"issueType": key, "workflow": workflow})
+                config.append({"issueType": key, "workflow": workflow, "resolutions": resolutions})
         return config
 
     def _prepare_workflows_data(self, queue_key: str, board_name: str, board_statuses: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -481,6 +485,8 @@ class CardDumper(BaseDumper):
 
     _STANDARD_TYPE = "task"
     _STANDARD_PRIORITY = "normal"
+    # Kaiten card states: 1 — queued, 2 — in progress, 3 — done
+    _DONE_STATE = 3
 
     def __init__(
         self,
@@ -514,6 +520,7 @@ class CardDumper(BaseDumper):
     ) -> None:
         created_at_by_card_id = created_at_by_card_id or {}
         created_by = self._prepare_user(card.get("owner") or self._fetcher.resolve_user(card.get("owner_id")))
+        updated_by = self._prepare_user(self._fetcher.resolve_user(card.get("updater_id"))) or created_by
 
         prepared_data = {
             "key": issue_key,
@@ -523,7 +530,8 @@ class CardDumper(BaseDumper):
             "updatedAt": self._prepare_updated_at(
                 card, [created_at_by_card_id.get(card_id) for card_id in related_card_ids]
             ),
-            "updatedBy": self._prepare_user(self._fetcher.resolve_user(card.get("updater_id"))) or created_by,
+            "updatedBy": updated_by,
+            **self._prepare_resolution(card, updated_by),
             "type": self._type_keys.get(card.get("type_id"), self._STANDARD_TYPE),
             "priority": self._STANDARD_PRIORITY,
             "status": self._prepare_status(card, status_by_column_id or {}),
@@ -562,9 +570,29 @@ class CardDumper(BaseDumper):
             )
         return status
 
+    def _prepare_resolution(self, card: Dict[str, Any], resolved_by: Optional[str]) -> Dict[str, Any]:
+        """A done card (Kaiten state 3) is resolved at its last move to a done column, else at its completion or
+        last update, not earlier than its creation; the resolver is the last editor. Without the resolver or a date
+        the card is not resolved: Tracker requires the resolution, its time and author together."""
+        if card.get("state") != self._DONE_STATE:
+            return {}
+        if not resolved_by:
+            logger.warning(f"Card {card.get('id')} is done, but its editor and author are unknown: it is not resolved")
+            return {}
+        resolved = card.get("last_moved_to_done_at") or card.get("completed_at") or card.get("updated")
+        resolved_at = latest_tracker_datetime([resolved, card.get("created")])
+        if not resolved_at:
+            logger.warning(f"Card {card.get('id')} is done, but has no dates: it is not resolved")
+            return {}
+        return {"resolution": RESOLUTION_KEY, "resolvedAt": resolved_at, "resolvedBy": resolved_by}
+
     def _prepare_updated_at(self, card: Dict[str, Any], related_created_at: List[Any]) -> Optional[str]:
-        """The latest date of the card, its comments, files, time logs and related cards."""
-        dates = [card.get("created"), card.get("updated"), *related_created_at]
+        """The latest date of the card, including its completion, and of its comments, files, time logs and related
+        cards."""
+        dates = [
+            card.get("created"), card.get("updated"), card.get("last_moved_to_done_at"), card.get("completed_at"),
+            *related_created_at,
+        ]
         for comment in card.get("comments") or []:
             dates += [comment.get("created"), comment.get("updated")]
         dates += [file.get("created") for file in card.get("files") or []]
