@@ -1,9 +1,10 @@
 import logging
 import re
 import yaml
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 from .transliterate import translit
 
@@ -173,10 +174,25 @@ def latest_tracker_datetime(values: Iterable[Any]) -> Optional[str]:
 
 
 def to_tracker_date(value: Any) -> Optional[str]:
-    """Kaiten dates/datetimes -> ``YYYY-MM-DD`` (Tracker ``deadline``/``start``/``end``)."""
+    """Kaiten date or timestamp -> ``YYYY-MM-DD`` as written, without time zone conversion."""
     if not value:
         return None
     return str(value)[:10]
+
+
+def to_local_date(value: Any, timezone: str, midnight_utc_is_date: bool = False) -> Optional[str]:
+    """Kaiten timestamp -> ``YYYY-MM-DD`` of its day in `timezone`. With `midnight_utc_is_date` a
+    timestamp at midnight UTC is a date without time and keeps its day."""
+    if not value:
+        return None
+    try:
+        moment = datetime.strptime(to_tracker_datetime(value), TRACKER_DATETIME_FORMAT)
+    except ValueError:
+        logger.warning(f"Unrecognized date {value!r} is taken as written")
+        return to_tracker_date(value)
+    if midnight_utc_is_date and moment.utcoffset() == timedelta(0) and moment.time() == datetime.min.time():
+        return moment.date().isoformat()
+    return moment.astimezone(ZoneInfo(timezone)).date().isoformat()
 
 
 def prepare_attachment_filename(original_name: str, attachment_id: str) -> str:
@@ -188,3 +204,8 @@ def prepare_attachment_filename(original_name: str, attachment_id: str) -> str:
 
     name, ext = original_name.rsplit(".", 1)
     return f"{name}_{attachment_id}.{ext}"
+
+
+def sort_by_created(cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cards in the order of their issue numbers: by creation, cards without a date last."""
+    return sorted(cards, key=lambda card: (not card.get("created"), card.get("created") or ""))

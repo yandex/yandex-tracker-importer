@@ -1,11 +1,13 @@
 import argparse
 import logging
 import os
+import sys
 from datetime import datetime
 
 from tqdm import tqdm
 
 from .config import get_config_content, get_generic_keys_mapping
+from .dump_results import build_summary
 from .kaiten_client import SimpleKaitenClient
 from .kaiten_dumper import KaitenDumper
 
@@ -73,8 +75,20 @@ def main() -> None:
     boards_mapper = get_generic_keys_mapping(project_path, "boards")
 
     dumper = KaitenDumper(source_client, boards_mapper, data_path, max_workers=args.workers)
+    results = []
     for result in tqdm(dumper.dump(), total=len(boards_mapper), desc="Boards"):
         result.log()
+        results.append(result)
+    summary = build_summary(results, dumper.failed_files)
+    if summary:
+        message = "Export finished with errors:\n" + "\n".join(summary)
+        logger.error(message)
+    else:
+        message = "Export finished without errors"
+        logger.info(message)
+    print(message)
+    if summary:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import logging
+import os
 import platform
 import time
 from typing import Any, Dict, List, Optional
@@ -162,11 +163,59 @@ class SimpleKaitenClient:
 
         return items
 
-    def download_file(self, url: str, file_path: str) -> None:
-        headers = {"Authorization": f"Bearer {self.token}"}
-        with requests.get(url, headers=headers, stream=True, timeout=60) as response:
-            response.raise_for_status()
-            with open(file_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+    def download_file(self, url: str, file_path: str, expected_size: Optional[int] = None) -> None:
+        """Downloads a file into a temporary file and renames it when the body is complete: its size
+        matches `Content-Length` and `expected_size`, if given.
+        A connection error, a broken body, a timeout, 408, 429, 5xx or an incomplete body is retried."""
+        headers = {"Authorization": f"Bearer {self.token}", "Accept-Encoding": "identity"}
+        part_path = file_path + ".part"
+        delay = self.retry_delay
+        for attempt in range(self.max_retries + 1):
+            rate_limited = False
+            try:
+                with requests.get(url, headers=headers, stream=True, timeout=60) as response:
+                    if self._should_retry(response.status_code) or response.status_code >= 500:
+                        rate_limited = response.status_code == 429
+                        raise RetryableDownloadError(f"status {response.status_code}", response)
+                    response.raise_for_status()
+                    written = 0
+                    with open(part_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                written += len(chunk)
+                    # Content-Length of an encoded body differs from the number of decoded bytes
+                    content_length = None if response.headers.get("Content-Encoding") else response.headers.get("Content-Length")
+                    for expected in (content_length, expected_size):
+                        if expected is not None and written != int(expected):
+                            raise RetryableDownloadError(f"{written} of {expected} bytes received")
+                os.replace(part_path, file_path)
+                return
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+                requests.exceptions.Timeout,
+                RetryableDownloadError,
+            ) as e:
+                if attempt >= self.max_retries:
+                    raise DownloadError(f"Download failed after {self.max_retries + 1} attempts: {e}") from e
+                # 429 waits for Retry-After and does not grow the backoff, as in _make_request
+                wait_time = self._get_retry_after(e.response) if rate_limited else delay
+                logger.warning(f"Download failed: {e}. Retrying in {wait_time} seconds")
+                time.sleep(wait_time)
+                if not rate_limited:
+                    delay *= self.backoff_factor
+            finally:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+
+
+class RetryableDownloadError(Exception):
+    def __init__(self, message: str, response: Optional[requests.Response] = None):
+        super().__init__(message)
+        self.response = response
+
+
+class DownloadError(Exception):
+    pass

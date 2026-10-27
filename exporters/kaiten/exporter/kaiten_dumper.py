@@ -3,8 +3,7 @@ import os
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .dumpers import (
     BoardDumper,
@@ -27,7 +26,7 @@ from .dump_results import (
 )
 from .fetcher import KaitenDataFetcher
 from .kaiten_client import SimpleKaitenClient
-from .utils import dump_to_yaml, issue_types_by_card_type_id
+from .utils import dump_to_yaml, issue_types_by_card_type_id, sort_by_created
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +49,46 @@ class KaitenDumper:
         self._board_dumper = BoardDumper()
         self._boards: List[Dict[str, Any]] = []
         self._lane_values: set = set()
+        self._key_by_card_id: Dict[Any, str] = {}
+        self._created_at_by_card_id: Dict[Any, Any] = {}
+        self._related_card_ids: Dict[Any, set] = defaultdict(set)
+
+    @property
+    def failed_files(self) -> List[Tuple[str, str, str]]:
+        return self._card_dumper.failed_files
 
     def dump(self) -> Iterator[BoardDumpResult]:
         self._boards = []
+        self._card_dumper.failed_files.clear()
+        # boards and their cards are loaded and numbered first: a relation may lead to a card of
+        # another board; a board that fails here is left out of the numbering and its relations
+        loaded: Dict[str, Any] = {}
+        listed_card_ids: set = set()
         for board_id, queue_key in self._boards_mapper.items():
-            yield self._dump_board(board_id, queue_key)
+            try:
+                board = self._fetcher.fetch_board(board_id)
+                cards = self._fetcher.list_cards(board_id)
+                # a card listed twice (moved between boards during the listing) is exported once,
+                # with the board listed first
+                unique_cards = {}
+                for card in cards:
+                    if card["id"] in listed_card_ids or card["id"] in unique_cards:
+                        logger.warning(f"Board {board_id}: card {card['id']} is listed twice, exported once")
+                    else:
+                        unique_cards[card["id"]] = card
+                cards = list(unique_cards.values())
+                loaded[board_id] = (board, cards, self._number_cards(queue_key, cards))
+                listed_card_ids.update(unique_cards)
+            except Exception as exc:
+                loaded[board_id] = exc
+        self._index_cards([value for value in loaded.values() if not isinstance(value, Exception)])
+        for board_id, queue_key in self._boards_mapper.items():
+            value = loaded.pop(board_id)
+            if isinstance(value, Exception):
+                yield BoardDumpError(board_id, value)
+            else:
+                board, cards, _ = value
+                yield self._dump_board(board_id, queue_key, board, cards)
         self._dump_boards()
         self._dump_statuses()
         self._dump_resolutions()
@@ -62,9 +96,29 @@ class KaitenDumper:
         self._dump_global_fields()
         self._dump_category()
 
-    def _dump_board(self, board_id: str, queue_key: str) -> BoardDumpResult:
+    @staticmethod
+    def _number_cards(queue_key: str, cards: List[Dict[str, Any]]) -> Dict[Any, str]:
+        return {card["id"]: f"{queue_key}-{num}" for num, card in enumerate(sort_by_created(cards), start=1)}
+
+    def _index_cards(self, boards: List[Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[Any, str]]]) -> None:
+        """Issue keys, creation dates and related cards of the cards of all loaded boards."""
+        self._key_by_card_id = {}
+        self._created_at_by_card_id = {}
+        for _, cards, key_by_card_id in boards:
+            self._key_by_card_id.update(key_by_card_id)
+            self._created_at_by_card_id.update((card["id"], card.get("created")) for card in cards)
+        self._related_card_ids = defaultdict(set)
+        for _, cards, _ in boards:
+            for card in cards:
+                for target_id, _ in CardDumper.link_targets(card):
+                    if target_id in self._key_by_card_id:
+                        self._related_card_ids[card["id"]].add(target_id)
+                        self._related_card_ids[target_id].add(card["id"])
+
+    def _dump_board(
+        self, board_id: str, queue_key: str, board: Dict[str, Any], cards: List[Dict[str, Any]]
+    ) -> BoardDumpResult:
         try:
-            board = self._fetcher.fetch_board(board_id)
             sprints = self._fetcher.sprints_of_board(board_id)
             # Boards carry no owner; the queue lead falls back to the token owner.
             lead = self._board_to_queue_dumper._prepare_user(
@@ -87,12 +141,12 @@ class KaitenDumper:
             if lane_field_active:
                 self._lane_values.update(lane_titles)
 
-            cards = self._fetcher.fetch_cards_for_board(board_id)
+            cards = self._fetcher.fetch_cards_for_board(board_id, cards)
             board_sprints, sprint_by_card, tag_by_card = self._board_dumper.plan_sprints(
                 board_id, sprints, self._fetcher.iterations_of_board(board_id), cards, self._fetcher.resolve_sprint
             )
             card_results = self._dump_board_cards(
-                cards, queue_dump_path, queue_key, lane_field_active, status_by_column_id, sprint_by_card, tag_by_card
+                cards, queue_dump_path, lane_field_active, status_by_column_id, sprint_by_card, tag_by_card
             )
             self._boards.append(self._board_dumper.prepare(
                 board,
@@ -111,35 +165,21 @@ class KaitenDumper:
         self,
         cards: List[Dict[str, Any]],
         queue_path: str,
-        queue_key: str,
         lane_field_active: bool,
         status_by_column_id: Dict[Any, str],
         sprint_by_card: Dict[Any, str],
         tag_by_card: Dict[Any, str],
     ) -> List[CardDumpResult]:
-        cards = sorted(cards, key=lambda card: card.get("created") or datetime.now().isoformat())
-
-        # Assign issue keys up front so card relations (children/parents) can be
-        # resolved to keys while dumping.
-        key_by_card_id = {card["id"]: f"{queue_key}-{num}" for num, card in enumerate(cards, start=1)}
-        created_at_by_card_id = {card["id"]: card.get("created") for card in cards}
-        related_card_ids = defaultdict(set)
-        for card in cards:
-            for target_id, _ in CardDumper.link_targets(card):
-                if target_id in key_by_card_id:
-                    related_card_ids[card["id"]].add(target_id)
-                    related_card_ids[target_id].add(card["id"])
-
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             futures = [
                 executor.submit(
                     self._dump_single_card,
                     card=card,
                     queue_path=queue_path,
-                    issue_key=key_by_card_id[card["id"]],
-                    key_by_card_id=key_by_card_id,
-                    created_at_by_card_id=created_at_by_card_id,
-                    related_card_ids=related_card_ids[card["id"]],
+                    issue_key=self._key_by_card_id[card["id"]],
+                    key_by_card_id=self._key_by_card_id,
+                    created_at_by_card_id=self._created_at_by_card_id,
+                    related_card_ids=self._related_card_ids[card["id"]],
                     status_by_column_id=status_by_column_id,
                     lane_field_active=lane_field_active,
                     sprint=sprint_by_card.get(card["id"]),

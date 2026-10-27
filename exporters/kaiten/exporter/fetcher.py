@@ -4,6 +4,7 @@ import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -31,12 +32,31 @@ class KaitenDataFetcher:
         self._space_uids_by_board: Optional[Dict[str, List[str]]] = None
         self._iterations_by_space: Dict[str, List[Dict[str, Any]]] = {}
         self._current_user: Optional[Dict[str, Any]] = None
+        self._timeline_timezone = "UTC"
 
     # -- shared reference data ------------------------------------------------
 
     def preload_reference_data(self) -> None:
         self._users_by_id = {user["id"]: user for user in self.fetch_users()}
         self._current_user = self.fetch_current_user()
+        self._timeline_timezone = self.fetch_timeline_timezone()
+
+    def fetch_timeline_timezone(self) -> str:
+        """Time zone of the company timeline; card dates are converted to days in it."""
+        try:
+            timezone = (self._client.get("/companies/current") or {}).get("timeline_timezone")
+            if not timezone:
+                logger.warning("The company has no timeline time zone, dates are taken in UTC")
+                return "UTC"
+            ZoneInfo(timezone)
+            return timezone
+        except Exception:
+            logger.exception("Failed to fetch the timeline time zone, dates are taken in UTC")
+            return "UTC"
+
+    @property
+    def timeline_timezone(self) -> str:
+        return self._timeline_timezone
 
     def fetch_current_user(self) -> Optional[Dict[str, Any]]:
         try:
@@ -160,10 +180,26 @@ class KaitenDataFetcher:
 
     # -- cards ----------------------------------------------------------------
 
-    def fetch_cards_for_board(self, board_id: str) -> List[Dict[str, Any]]:
+    def list_cards(self, board_id: str) -> List[Dict[str, Any]]:
+        """Cards of a board as the list returns them, with `blockers` of blocked cards: enough to
+        number cards and resolve their relations before the full cards are fetched."""
         try:
+            # the list holds archived cards too; deleted cards are not returned
             cards = self._client.get_paginated("/cards", params={"board_id": board_id}) or []
+            blocked = [card for card in cards if card.get("blocked")]
+            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                blockers = executor.map(lambda card: self._safe_get(f"/cards/{card['id']}/blockers"), blocked)
+                for card, card_blockers in zip(blocked, blockers):
+                    # without an answer the active blockers embedded in the list are kept
+                    card["blockers"] = card_blockers if card_blockers is not None else card.get("blockers") or []
+            return cards
+        except Exception:
+            logger.exception(f"Failed to fetch cards for board {board_id}")
+            raise
 
+    def fetch_cards_for_board(self, board_id: str, cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Full cards for the cards of `list_cards`."""
+        try:
             process_func = functools.partial(self._process_single_card, board_id=board_id)
             with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 return list(executor.map(process_func, cards))
@@ -178,15 +214,14 @@ class KaitenDataFetcher:
         # the full card carries those plus embedded ``files`` and ``checklists``
         # (checklists have no standalone GET endpoint, so we request them inline).
         full_card = self._safe_get(f"/cards/{card_id}", params={"additional_card_fields": "checklists"}) or {}
-        card = {**card, **full_card}
+        # relations come from the list: issue numbers and related cards are resolved from it
+        card = {**card, **full_card, "blockers": card.get("blockers") or [], "children_ids": card.get("children_ids") or []}
 
         card["comments"] = self._enrich_comments(self._safe_get(f"/cards/{card_id}/comments") or [])
         card["time_logs"] = self._enrich_time_logs(self._safe_get(f"/cards/{card_id}/time-logs") or [])
         if card.get("files") is None:
             card["files"] = self._safe_get(f"/cards/{card_id}/files") or []
         card["checklists"] = self._enrich_checklists(card.get("checklists") or [])
-        if card.get("blocked"):
-            card["blockers"] = self._safe_get(f"/cards/{card_id}/blockers") or []
         card["board_id"] = board_id
         return card
 

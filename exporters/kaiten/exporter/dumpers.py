@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from urllib.parse import quote
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
@@ -17,6 +18,7 @@ from .utils import (
     latest_tracker_datetime,
     local_fields_by_property_id,
     prepare_attachment_filename,
+    to_local_date,
     to_tracker_date,
     to_tracker_datetime,
 )
@@ -24,6 +26,15 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = {"en": "Kaiten", "ru": "Kaiten"}
+
+# an archived card is an issue with this tag, off the board and its sprints
+ARCHIVE_TAG = "Архив Kaiten"
+
+# characters kept as is in a link url; "(", ")" and spaces are percent-encoded
+URL_SAFE_CHARS = ":/?#@!$&'*+,;=%-._~"
+
+# heading of the description list of files linked from external storages
+EXTERNAL_FILES_HEADER = "Файлы по ссылкам:"
 
 # resolution of done cards
 RESOLUTION_KEY = "fixed"
@@ -297,6 +308,28 @@ class BoardToQueueDumper(BaseDumper):
         return None
 
 
+def stored_files(card: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Files stored in Kaiten."""
+    return [file for file in card.get("files") or [] if not file.get("external")]
+
+
+def linked_files(card: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Files linked from external storages (`external`): their urls lead outside Kaiten."""
+    return [file for file in card.get("files") or [] if file.get("external")]
+
+
+def markdown_link(name: Optional[str], url: Optional[str]) -> str:
+    label = re.sub(r"([\\\[\]])", r"\\\1", name or url or "")
+    if not url:
+        return label
+    return f"[{label}]({quote(url, safe=URL_SAFE_CHARS)})"
+
+
+def is_archived(card: Dict[str, Any]) -> bool:
+    """Kaiten card conditions: 1 — on the board, 2 — archived."""
+    return bool(card.get("archived")) or card.get("condition") == 2
+
+
 def has_valid_dates(sprint: Dict[str, Any]) -> bool:
     """Both dates are set and recognized, the start is not later than the end: otherwise a sprint or an
     iteration is not exported."""
@@ -319,12 +352,14 @@ def _name(sprint: Dict[str, Any]) -> str:
 
 
 class BoardDumper:
-    """Kaiten board -> board of `boards.yaml` with its sprints and the board's queue as the add rule.
+    """Kaiten board -> board of `boards.yaml` with its sprints; the add rule is the board's queue without the
+    archive tag.
 
-    Sprints of a board are its Kaiten sprints and the iterations of its spaces that hold its cards. An
-    issue is in one sprint of its board: an active iteration, else a planned one, else a sprint, else the
-    latest closed iteration. A sprint or an iteration without valid dates is not exported; an issue none of
-    whose sprints is exported gets the sprint name as a tag. One sprint of a board is in progress."""
+    Sprints of a board are its Kaiten sprints and the iterations of its spaces that hold its cards that are not
+    archived. An issue is in one sprint of its board: an active iteration, else a planned one, else a sprint,
+    else the latest closed iteration. A sprint or an iteration without valid dates is not exported; an issue none
+    of whose sprints is exported gets the sprint name as a tag, as does an archived card. One sprint of a board is
+    in progress."""
 
     _ITERATION_STATUSES = {"planned": "draft", "active": "in_progress", "closed": "released"}
 
@@ -346,7 +381,10 @@ class BoardDumper:
             "estimateBy": "storyPoints" if estimate_by_story_points else None,
             "columns": columns,
             "autoFilters": {
-                "addFilter": {"enabled": True, "fieldValues": {"queue": [{"fixed": queue_key, "invert": False}]}},
+                "addFilter": {"enabled": True, "fieldValues": {
+                    "queue": [{"fixed": queue_key, "invert": False}],
+                    "tags": [{"fixed": ARCHIVE_TAG, "invert": True}],
+                }},
             },
             "sprints": sprints,
         }
@@ -362,8 +400,10 @@ class BoardDumper:
         cards: List[Dict[str, Any]],
         resolve_sprint: Callable[[Any], Optional[Dict[str, Any]]] = lambda sprint_id: None,
     ) -> Tuple[List[Dict[str, Any]], Dict[Any, str], Dict[Any, str]]:
-        """Sprints of the board, the sprint of each card and the tag of each card none of whose sprints is exported."""
+        """Sprints of the board, the sprint of each card and the tag of each card none of whose sprints is exported.
+        An archived card is in no sprint: its sprint name is a tag."""
         card_ids = {card["id"] for card in cards}
+        archived = {card["id"] for card in cards if is_archived(card)}
         exported: List[Dict[str, Any]] = []
         # sprint candidates of a card: (rank, finish time, sprint id in boards.yaml or None, name)
         candidates: Dict[Any, List[Tuple[int, float, Optional[str], str]]] = defaultdict(list)
@@ -392,13 +432,15 @@ class BoardDumper:
             members = [card_id for card_id in self._iteration_cards(iteration) if card_id in card_ids]
             if not members:
                 continue
-            sprint_id = f"{iteration['id']}:{board_id}" if has_valid_dates(iteration) else None
-            if sprint_id:
-                exported.append(self._prepare_iteration(iteration, sprint_id))
             rank = {"active": self._ACTIVE_ITERATION, "planned": self._PLANNED_ITERATION}.get(
                 iteration.get("status"), self._CLOSED_ITERATION
             )
             finished = _timestamp(iteration.get("actual_finish_date"))
+            # an iteration of archived cards only is not a sprint of the board
+            sprint_id = None
+            if set(members) - archived and has_valid_dates(iteration):
+                sprint_id = f"{iteration['id']}:{board_id}"
+                exported.append(self._prepare_iteration(iteration, sprint_id))
             for card_id in members:
                 candidates[card_id].append((rank, finished, sprint_id, _name(iteration)))
 
@@ -406,6 +448,10 @@ class BoardDumper:
 
         sprint_by_card, tag_by_card = {}, {}
         for card_id, card_candidates in candidates.items():
+            if card_id in archived:
+                # an archived card gets only a tag: the sprint of the highest priority
+                tag_by_card[card_id] = min(card_candidates, key=lambda candidate: (candidate[0], -candidate[1]))[3]
+                continue
             # the highest priority; among closed iterations the latest. A sprint that is not exported counts only
             # when no sprint of the card is exported
             best = min(card_candidates, key=lambda candidate: (candidate[2] is None, candidate[0], -candidate[1]))
@@ -500,6 +546,8 @@ class CardDumper(BaseDumper):
         self._properties_by_id = {prop["id"]: prop for prop in custom_properties}
         self._type_keys = issue_type_keys(card_types)
         self._local_fields = local_fields_by_property_id(custom_properties)
+        # (issue key, file name, error) of files that are not downloaded
+        self.failed_files: List[Tuple[str, str, str]] = []
 
     @property
     def _filename(self) -> str:
@@ -536,18 +584,18 @@ class CardDumper(BaseDumper):
             "priority": self._STANDARD_PRIORITY,
             "status": self._prepare_status(card, status_by_column_id or {}),
             "description": self._prepare_description(card),
-            "deadline": to_tracker_date(card.get("due_date")),
+            **self._prepare_dates(card),
             "tags": self._prepare_tags(card, sprint_tag),
             "assignee": self._prepare_assignee(card),
             "followers": self._prepare_members(card),
             "checklistItems": self._prepare_checklists(card.get("checklists", [])),
             "comments": self._prepare_comments(card.get("comments", [])),
-            "attachments": self._prepare_attachments(card.get("files", [])),
+            "attachments": self._prepare_attachments(stored_files(card)),
             "worklogs": self._prepare_worklogs(card.get("time_logs", [])),
             "storyPoints": card.get("size"),
             "links": self._prepare_links(card, key_by_card_id or {}, created_at_by_card_id, created_by),
             "project": {"primary": card.get("board_id")},
-            "boards": [str(card["board_id"])] if card.get("board_id") is not None else [],
+            "boards": [str(card["board_id"])] if card.get("board_id") is not None and not is_archived(card) else [],
             "sprint": [sprint] if sprint else [],
             **self._prepare_local_fields(card),
         }
@@ -557,7 +605,7 @@ class CardDumper(BaseDumper):
             if lane_title:
                 prepared_data[LANE_FIELD_KEY] = lane_title
 
-        self._download_attachments(card.get("files", []), dump_path)
+        self._download_attachments(stored_files(card), dump_path, issue_key)
         self._clean_and_save_data(prepared_data, dump_path)
 
     def _prepare_status(self, card: Dict[str, Any], status_by_column_id: Dict[Any, str]) -> Optional[str]:
@@ -619,13 +667,30 @@ class CardDumper(BaseDumper):
 
     def _prepare_tags(self, card: Dict[str, Any], sprint_tag: Optional[str]) -> List[str]:
         tags = [tag.get("name") for tag in card.get("tags", []) if tag.get("name")]
-        return tags + [sprint_tag] if sprint_tag else tags
+        if sprint_tag:
+            tags.append(sprint_tag)
+        if is_archived(card):
+            tags.append(ARCHIVE_TAG)
+        elif ARCHIVE_TAG in tags:
+            logger.warning(f"Card {card.get('id')} is not archived, but has the tag {ARCHIVE_TAG}: the board add rule skips it")
+        return list(dict.fromkeys(tags))
+
+    def _prepare_dates(self, card: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        """Deadline and planned dates as days in the company timeline time zone. A deadline without time
+        and a planned date at 00:00 UTC keep their day as written."""
+        timezone = self._fetcher.timeline_timezone
+        due_date = card.get("due_date")
+        return {
+            "deadline": to_local_date(due_date, timezone) if card.get("due_date_time_present") else to_tracker_date(due_date),
+            "start": to_local_date(card.get("planned_start"), timezone, midnight_utc_is_date=True),
+            "end": to_local_date(card.get("planned_end"), timezone, midnight_utc_is_date=True),
+        }
 
     def _prepare_description(self, card: Dict[str, Any]) -> Optional[str]:
         description = card.get("description") or ""
         # Rewrite embedded file links to the local ``[filename]()`` form the importer
         # resolves against the attachments directory.
-        for file in card.get("files", []):
+        for file in stored_files(card):
             url = file.get("url")
             if not url:
                 continue
@@ -637,6 +702,9 @@ class CardDumper(BaseDumper):
             description = re.sub(
                 rf"(?<!!)\[[^\]]*\]\({escaped}[^)]*\)", f"[{local_name}]()", description
             )
+        links = [f"- {markdown_link(file.get('name'), file.get('url'))}" for file in linked_files(card)]
+        if links:
+            description = "\n\n".join(filter(None, [description, EXTERNAL_FILES_HEADER + "\n" + "\n".join(links)]))
         return description or None
 
     def _prepare_checklists(self, checklists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -777,7 +845,7 @@ class CardDumper(BaseDumper):
             return to_tracker_date(raw)
         return value
 
-    def _download_attachments(self, files: List[Dict[str, Any]], card_path: str) -> None:
+    def _download_attachments(self, files: List[Dict[str, Any]], card_path: str, issue_key: str) -> None:
         if not files:
             return
 
@@ -785,14 +853,21 @@ class CardDumper(BaseDumper):
         os.makedirs(attachments_path, exist_ok=True)
 
         for file in files:
+            filename = prepare_attachment_filename(file.get("name", "file"), str(file.get("id")))
             url = file.get("url")
             if not url:
+                self.failed_files.append((issue_key, filename, "no file url"))
                 continue
+            file_path = os.path.join(attachments_path, filename)
+            size = file.get("size")
+            # a file of a previous export is kept when its size matches the size in Kaiten and removed
+            # when it differs; without the size in Kaiten it stays until a new download replaces it
+            if size is not None and os.path.isfile(file_path):
+                if os.path.getsize(file_path) == size:
+                    continue
+                os.remove(file_path)
             try:
-                file_path = os.path.join(
-                    attachments_path,
-                    prepare_attachment_filename(file.get("name", "file"), str(file.get("id"))),
-                )
-                self._client.download_file(url, file_path)
-            except Exception:
-                logger.exception(f"Failed to download {file.get('name')}")
+                self._client.download_file(url, file_path, expected_size=size)
+            except Exception as exc:
+                logger.exception(f"Failed to download {filename} of {issue_key}")
+                self.failed_files.append((issue_key, filename, str(exc)))
