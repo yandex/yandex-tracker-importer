@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
 from .dumpers import (
+    BoardDumper,
     BoardToProjectDumper,
     BoardToQueueDumper,
     CardDumper,
@@ -44,11 +45,15 @@ class KaitenDumper:
         self._board_to_queue_dumper = BoardToQueueDumper(self._card_types, self._custom_properties)
         self._board_to_project_dumper = BoardToProjectDumper()
         self._card_dumper = CardDumper(client, self._fetcher, self._custom_properties, self._card_types)
+        self._board_dumper = BoardDumper()
+        self._boards: List[Dict[str, Any]] = []
         self._lane_values: set = set()
 
     def dump(self) -> Iterator[BoardDumpResult]:
+        self._boards = []
         for board_id, queue_key in self._boards_mapper.items():
             yield self._dump_board(board_id, queue_key)
+        self._dump_boards()
         self._dump_statuses()
         self._dump_issue_types()
         self._dump_global_fields()
@@ -57,9 +62,8 @@ class KaitenDumper:
     def _dump_board(self, board_id: str, queue_key: str) -> BoardDumpResult:
         try:
             board = self._fetcher.fetch_board(board_id)
-            self._fetcher.preload_sprints(board_id)
-            # Boards carry no owner; fall back to the authenticated user so the
-            # queue always has a (required) lead.
+            sprints = self._fetcher.sprints_of_board(board_id)
+            # Boards carry no owner; the queue lead falls back to the token owner.
             lead = self._board_to_queue_dumper._prepare_user(
                 board.get("owner") or self._fetcher.current_user
             )
@@ -80,20 +84,37 @@ class KaitenDumper:
             if lane_field_active:
                 self._lane_values.update(lane_titles)
 
-            card_results = self._dump_board_cards(
-                board_id, queue_dump_path, queue_key, lane_field_active, status_by_column_id
+            cards = self._fetcher.fetch_cards_for_board(board_id)
+            board_sprints, sprint_by_card, tag_by_card = self._board_dumper.plan_sprints(
+                board_id, sprints, self._fetcher.iterations_of_board(board_id), cards, self._fetcher.resolve_sprint
             )
+            card_results = self._dump_board_cards(
+                cards, queue_dump_path, queue_key, lane_field_active, status_by_column_id, sprint_by_card, tag_by_card
+            )
+            self._boards.append(self._board_dumper.prepare(
+                board,
+                queue_key,
+                self._board_to_queue_dumper.board_columns(board, status_by_column_id),
+                board_sprints,
+                # the token owner is the queue lead, not the board author
+                created_by=self._board_to_queue_dumper._prepare_user(board.get("owner")),
+                estimate_by_story_points=any(card.get("size") is not None for card in cards),
+            ))
             return BoardDumpSuccess(board_id, queue_key, card_results)
         except Exception as exc:
             return BoardDumpError(board_id, exc)
 
     def _dump_board_cards(
-        self, board_id: str, queue_path: str, queue_key: str, lane_field_active: bool, status_by_column_id: Dict[Any, str]
+        self,
+        cards: List[Dict[str, Any]],
+        queue_path: str,
+        queue_key: str,
+        lane_field_active: bool,
+        status_by_column_id: Dict[Any, str],
+        sprint_by_card: Dict[Any, str],
+        tag_by_card: Dict[Any, str],
     ) -> List[CardDumpResult]:
-        cards = sorted(
-            self._fetcher.fetch_cards_for_board(board_id),
-            key=lambda card: card.get("created") or datetime.now().isoformat(),
-        )
+        cards = sorted(cards, key=lambda card: card.get("created") or datetime.now().isoformat())
 
         # Assign issue keys up front so card relations (children/parents) can be
         # resolved to keys while dumping.
@@ -118,6 +139,8 @@ class KaitenDumper:
                     related_card_ids=related_card_ids[card["id"]],
                     status_by_column_id=status_by_column_id,
                     lane_field_active=lane_field_active,
+                    sprint=sprint_by_card.get(card["id"]),
+                    sprint_tag=tag_by_card.get(card["id"]),
                 )
                 for card in cards
             ]
@@ -133,6 +156,8 @@ class KaitenDumper:
         related_card_ids: set,
         status_by_column_id: dict,
         lane_field_active: bool,
+        sprint: Optional[str],
+        sprint_tag: Optional[str],
     ) -> CardDumpResult:
         try:
             dump_path = os.path.join(queue_path, issue_key)
@@ -141,10 +166,16 @@ class KaitenDumper:
                 key_by_card_id=key_by_card_id, created_at_by_card_id=created_at_by_card_id,
                 related_card_ids=related_card_ids,
                 status_by_column_id=status_by_column_id, lane_field_active=lane_field_active,
+                sprint=sprint, sprint_tag=sprint_tag,
             )
             return CardDumpSuccess(card["id"], issue_key)
         except Exception as exc:
             return CardDumpError(card["id"], exc)
+
+    def _dump_boards(self) -> None:
+        if self._boards:
+            boards = self._board_to_queue_dumper._clean_empty(self._boards)
+            dump_to_yaml(boards, os.path.join(self._data_path, "boards.yaml"))
 
     def _dump_statuses(self) -> None:
         dump_path = os.path.join(self._data_path, "statuses.yaml")

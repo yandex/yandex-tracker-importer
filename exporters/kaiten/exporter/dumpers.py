@@ -2,11 +2,14 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections import defaultdict
+from datetime import datetime
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .fetcher import KaitenDataFetcher
 from .kaiten_client import SimpleKaitenClient
 from .utils import (
+    TRACKER_DATETIME_FORMAT,
     KeyAllocator,
     NameAllocator,
     dump_to_yaml,
@@ -94,6 +97,8 @@ class BoardToQueueDumper(BaseDumper):
 
     # Kaiten column type -> Tracker status type
     _STATUS_TYPES = {1: "new", 2: "inProgress", 3: "done"}
+    # Kaiten WIP limit types: 1 — number of cards, 2 — total card size
+    _WIP_LIMIT_BY_COUNT = 1
 
     def __init__(self, card_types: List[Dict[str, Any]], custom_properties: List[Dict[str, Any]]):
         self._custom_properties = custom_properties
@@ -161,6 +166,29 @@ class BoardToQueueDumper(BaseDumper):
             logger.warning(f"Column {name} has no known type, its status is exported as inProgress")
             return "inProgress"
         return status_type
+
+    def board_columns(self, board: Dict[str, Any], status_by_column_id: Dict[Any, str]) -> List[Dict[str, Any]]:
+        """Columns of the Tracker board: a column holds the statuses of its subcolumns and its WIP limit
+        by the number of cards."""
+        result = []
+        for column in self._by_sort_order(board.get("columns") or []):
+            leaves = self._by_sort_order(column.get("subcolumns") or []) or [column]
+            statuses = []
+            for leaf in leaves:
+                status = status_by_column_id.get(leaf.get("id"))
+                if status and status not in statuses:
+                    statuses.append(status)
+                if leaf is not column and leaf.get("wip_limit"):
+                    logger.warning(
+                        f"Subcolumn {self._column_name(leaf)} of column {self._column_name(column)} has a WIP limit, "
+                        "it is not exported"
+                    )
+            limit = column.get("wip_limit")
+            if limit and column.get("wip_limit_type") not in (None, self._WIP_LIMIT_BY_COUNT):
+                logger.warning(f"Column {self._column_name(column)} has a WIP limit by card size, it is not exported")
+                limit = None
+            result.append({"id": column.get("id"), "name": self._column_name(column), "statuses": statuses, "limit": limit})
+        return result
 
     @staticmethod
     def _by_sort_order(columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -265,6 +293,190 @@ class BoardToQueueDumper(BaseDumper):
         return None
 
 
+def has_valid_dates(sprint: Dict[str, Any]) -> bool:
+    """Both dates are set and recognized, the start is not later than the end: otherwise a sprint or an
+    iteration is not exported."""
+    start, end = sprint.get("start_date"), sprint.get("finish_date")
+    if not start or not end:
+        logger.warning(f"Sprint or iteration {_name(sprint)} has no start or end date, it is not exported")
+        return False
+    start_at, end_at = _timestamp(start), _timestamp(end)
+    if not start_at or not end_at:
+        logger.warning(f"Sprint or iteration {_name(sprint)} has an unrecognized date, it is not exported")
+        return False
+    if start_at > end_at:
+        logger.warning(f"Sprint or iteration {_name(sprint)} starts after its end, it is not exported")
+        return False
+    return True
+
+
+def _name(sprint: Dict[str, Any]) -> str:
+    return sprint.get("title") or f"Sprint {sprint.get('id')}"
+
+
+class BoardDumper:
+    """Kaiten board -> board of `boards.yaml` with its sprints and the board's queue as the add rule.
+
+    Sprints of a board are its Kaiten sprints and the iterations of its spaces that hold its cards. An
+    issue is in one sprint of its board: an active iteration, else a planned one, else a sprint, else the
+    latest closed iteration. A sprint or an iteration without valid dates is not exported; an issue none of
+    whose sprints is exported gets the sprint name as a tag. One sprint of a board is in progress."""
+
+    _ITERATION_STATUSES = {"planned": "draft", "active": "in_progress", "closed": "released"}
+
+    def prepare(
+        self,
+        board: Dict[str, Any],
+        queue_key: str,
+        columns: List[Dict[str, Any]],
+        sprints: List[Dict[str, Any]],
+        created_by: Optional[str],
+        estimate_by_story_points: bool,
+    ) -> Dict[str, Any]:
+        """`sprints` are sprints of `boards.yaml` (see `plan_sprints`)."""
+        return {
+            "id": str(board.get("id")),
+            "name": board.get("title"),
+            "createdBy": created_by,
+            "sprintsAvailable": bool(sprints),
+            "estimateBy": "storyPoints" if estimate_by_story_points else None,
+            "columns": columns,
+            "autoFilters": {
+                "addFilter": {"enabled": True, "fieldValues": {"queue": [{"fixed": queue_key, "invert": False}]}},
+            },
+            "sprints": sprints,
+        }
+
+    # sprint candidates of a card, in order of priority
+    _ACTIVE_ITERATION, _PLANNED_ITERATION, _SPRINT, _CLOSED_ITERATION = range(4)
+
+    def plan_sprints(
+        self,
+        board_id: Any,
+        sprints: List[Dict[str, Any]],
+        iterations: List[Dict[str, Any]],
+        cards: List[Dict[str, Any]],
+        resolve_sprint: Callable[[Any], Optional[Dict[str, Any]]] = lambda sprint_id: None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[Any, str], Dict[Any, str]]:
+        """Sprints of the board, the sprint of each card and the tag of each card none of whose sprints is exported."""
+        card_ids = {card["id"] for card in cards}
+        exported: List[Dict[str, Any]] = []
+        # sprint candidates of a card: (rank, finish time, sprint id in boards.yaml or None, name)
+        candidates: Dict[Any, List[Tuple[int, float, Optional[str], str]]] = defaultdict(list)
+
+        sprint_by_id = {}
+        for sprint in sprints:
+            sprint_id = str(sprint.get("id")) if has_valid_dates(sprint) else None
+            if sprint_id:
+                exported.append(self._prepare_sprint(sprint))
+            sprint_by_id[sprint.get("id")] = (sprint_id, _name(sprint))
+        for card in cards:
+            if card.get("sprint_id") is None:
+                continue
+            if card["sprint_id"] in sprint_by_id:
+                sprint_id, name = sprint_by_id[card["sprint_id"]]
+            else:
+                # a sprint of another board is not exported for this board
+                other = resolve_sprint(card["sprint_id"])
+                if not other or not other.get("title"):
+                    logger.warning(f"Sprint {card['sprint_id']} of card {card['id']} is not found, it is not exported")
+                    continue
+                sprint_id, name = None, other["title"]
+            candidates[card["id"]].append((self._SPRINT, 0.0, sprint_id, name))
+
+        for iteration in iterations:
+            members = [card_id for card_id in self._iteration_cards(iteration) if card_id in card_ids]
+            if not members:
+                continue
+            sprint_id = f"{iteration['id']}:{board_id}" if has_valid_dates(iteration) else None
+            if sprint_id:
+                exported.append(self._prepare_iteration(iteration, sprint_id))
+            rank = {"active": self._ACTIVE_ITERATION, "planned": self._PLANNED_ITERATION}.get(
+                iteration.get("status"), self._CLOSED_ITERATION
+            )
+            finished = _timestamp(iteration.get("actual_finish_date"))
+            for card_id in members:
+                candidates[card_id].append((rank, finished, sprint_id, _name(iteration)))
+
+        self._keep_one_sprint_in_progress(exported)
+
+        sprint_by_card, tag_by_card = {}, {}
+        for card_id, card_candidates in candidates.items():
+            # the highest priority; among closed iterations the latest. A sprint that is not exported counts only
+            # when no sprint of the card is exported
+            best = min(card_candidates, key=lambda candidate: (candidate[2] is None, candidate[0], -candidate[1]))
+            _, _, sprint_id, name = best
+            if sprint_id:
+                sprint_by_card[card_id] = sprint_id
+            else:
+                logger.warning(f"Card {card_id} is in sprint {name} that is not exported, the sprint is a tag")
+                tag_by_card[card_id] = name
+        return exported, sprint_by_card, tag_by_card
+
+    @staticmethod
+    def _keep_one_sprint_in_progress(sprints: List[Dict[str, Any]]) -> None:
+        """A Tracker board has one sprint in progress: the sprint that started last; the others are drafts."""
+        in_progress = [sprint for sprint in sprints if sprint["status"] == "in_progress"]
+        if len(in_progress) < 2:
+            return
+        current = max(in_progress, key=lambda sprint: _timestamp(sprint["startDateTime"]))
+        for sprint in in_progress:
+            if sprint is not current:
+                logger.warning(f"Sprint {sprint['name']} is in progress with sprint {current['name']}, it is exported as a draft")
+                sprint["status"] = "draft"
+
+    @staticmethod
+    def _iteration_cards(iteration: Dict[str, Any]) -> List[Any]:
+        """Cards of an iteration. Closing removes unfinished cards: a card removed at closing or later was in the
+        closed iteration."""
+        closed_at = _timestamp(iteration.get("actual_finish_date"))
+        # without a recognized closing time only cards that were not removed count
+        closed = iteration.get("status") == "closed" and closed_at > 0
+        return [
+            record.get("card_id")
+            for record in iteration.get("card_records") or []
+            if not record.get("removed_at") or (closed and _timestamp(record["removed_at"]) >= closed_at)
+        ]
+
+    @staticmethod
+    def _prepare_sprint(sprint: Dict[str, Any]) -> Dict[str, Any]:
+        if sprint.get("archived"):
+            status = "archived"
+        elif sprint.get("active"):
+            status = "in_progress"
+        elif sprint.get("actual_finish_date"):
+            status = "released"
+        else:
+            status = "draft"
+        return {
+            "id": str(sprint.get("id")),
+            "name": _name(sprint),
+            "status": status,
+            "startDateTime": to_tracker_datetime(sprint.get("start_date")),
+            "endDateTime": to_tracker_datetime(sprint.get("finish_date")),
+        }
+
+    def _prepare_iteration(self, iteration: Dict[str, Any], sprint_id: str) -> Dict[str, Any]:
+        return {
+            "id": sprint_id,
+            "name": _name(iteration),
+            "status": self._ITERATION_STATUSES.get(iteration.get("status"), "draft"),
+            "startDateTime": to_tracker_datetime(iteration.get("start_date")),
+            "endDateTime": to_tracker_datetime(iteration.get("finish_date")),
+        }
+
+
+def _timestamp(value: Any) -> float:
+    date = to_tracker_datetime(value)
+    if not date:
+        return 0.0
+    try:
+        return datetime.strptime(date, TRACKER_DATETIME_FORMAT).timestamp()
+    except ValueError:
+        logger.warning(f"Unrecognized date {value} is skipped")
+        return 0.0
+
+
 class CardDumper(BaseDumper):
 
     _STANDARD_TYPE = "task"
@@ -297,6 +509,8 @@ class CardDumper(BaseDumper):
         related_card_ids: Iterable[Any] = (),
         status_by_column_id: Optional[Dict[Any, str]] = None,
         lane_field_active: bool = False,
+        sprint: Optional[str] = None,
+        sprint_tag: Optional[str] = None,
     ) -> None:
         created_at_by_card_id = created_at_by_card_id or {}
         created_by = self._prepare_user(card.get("owner") or self._fetcher.resolve_user(card.get("owner_id")))
@@ -315,7 +529,7 @@ class CardDumper(BaseDumper):
             "status": self._prepare_status(card, status_by_column_id or {}),
             "description": self._prepare_description(card),
             "deadline": to_tracker_date(card.get("due_date")),
-            "tags": self._prepare_tags(card),
+            "tags": self._prepare_tags(card, sprint_tag),
             "assignee": self._prepare_assignee(card),
             "followers": self._prepare_members(card),
             "checklistItems": self._prepare_checklists(card.get("checklists", [])),
@@ -325,6 +539,8 @@ class CardDumper(BaseDumper):
             "storyPoints": card.get("size"),
             "links": self._prepare_links(card, key_by_card_id or {}, created_at_by_card_id, created_by),
             "project": {"primary": card.get("board_id")},
+            "boards": [str(card["board_id"])] if card.get("board_id") is not None else [],
+            "sprint": [sprint] if sprint else [],
             **self._prepare_local_fields(card),
         }
 
@@ -373,13 +589,9 @@ class CardDumper(BaseDumper):
                 followers.append(login)
         return followers
 
-    def _prepare_tags(self, card: Dict[str, Any]) -> List[str]:
+    def _prepare_tags(self, card: Dict[str, Any], sprint_tag: Optional[str]) -> List[str]:
         tags = [tag.get("name") for tag in card.get("tags", []) if tag.get("name")]
-        # Kaiten sprints have no Tracker equivalent; carry the sprint name as a tag.
-        sprint = self._fetcher.resolve_sprint(card.get("sprint_id"))
-        if sprint and sprint.get("title"):
-            tags.append(sprint["title"])
-        return tags
+        return tags + [sprint_tag] if sprint_tag else tags
 
     def _prepare_description(self, card: Dict[str, Any]) -> Optional[str]:
         description = card.get("description") or ""

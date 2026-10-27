@@ -1,8 +1,11 @@
 import functools
 import logging
 import os
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
+
+import requests
 
 from .kaiten_client import SimpleKaitenClient
 
@@ -24,6 +27,9 @@ class KaitenDataFetcher:
         self._max_workers = max_workers or os.cpu_count()
         self._users_by_id: Dict[Any, Dict[str, Any]] = {}
         self._sprints_by_id: Dict[Any, Dict[str, Any]] = {}
+        self._all_sprints: Optional[List[Dict[str, Any]]] = None
+        self._space_uids_by_board: Optional[Dict[str, List[str]]] = None
+        self._iterations_by_space: Dict[str, List[Dict[str, Any]]] = {}
         self._current_user: Optional[Dict[str, Any]] = None
 
     # -- shared reference data ------------------------------------------------
@@ -79,14 +85,58 @@ class KaitenDataFetcher:
     def resolve_user(self, user_id: Any) -> Optional[Dict[str, Any]]:
         return self._users_by_id.get(user_id)
 
-    def preload_sprints(self, board_id: str) -> None:
+    def sprints_of_board(self, board_id: str) -> List[Dict[str, Any]]:
+        """Sprints of the board. `/sprints` returns sprints of all boards: they are loaded once."""
+        if self._all_sprints is None:
+            try:
+                self._all_sprints = self._client.get_paginated("/sprints") or []
+            except Exception:
+                logger.exception("Failed to fetch sprints, boards are exported without sprints")
+                self._all_sprints = []
+            self._sprints_by_id = {sprint["id"]: sprint for sprint in self._all_sprints}
+        return [sprint for sprint in self._all_sprints if str(sprint.get("board_id")) == str(board_id)]
+
+    def iterations_of_board(self, board_id: str) -> List[Dict[str, Any]]:
+        """Iterations of the board's spaces except removed ones, each with `card_records` — its cards. Iterations
+        belong to a space and are loaded once per space."""
+        result = {}
+        for space_uid in self._space_uids(board_id):
+            if space_uid not in self._iterations_by_space:
+                self._iterations_by_space[space_uid] = self._load_iterations(space_uid)
+            for iteration in self._iterations_by_space[space_uid]:
+                result.setdefault(iteration["id"], iteration)
+        return list(result.values())
+
+    def _space_uids(self, board_id: str) -> List[str]:
+        if self._space_uids_by_board is None:
+            try:
+                spaces = self._client.get("/spaces") or []
+            except Exception:
+                logger.exception("Failed to fetch spaces, boards are exported without iterations")
+                spaces = []
+            self._space_uids_by_board = defaultdict(list)
+            for space in spaces:
+                for board in space.get("boards") or []:
+                    self._space_uids_by_board[str(board.get("id"))].append(space.get("uid"))
+        return self._space_uids_by_board.get(str(board_id), [])
+
+    def _load_iterations(self, space_uid: str) -> List[Dict[str, Any]]:
         try:
-            sprints = self._client.get_paginated("/sprints", params={"board_id": board_id}) or []
-        except Exception:
-            logger.exception(f"Failed to fetch sprints for board {board_id}")
-            return
-        for sprint in sprints:
-            self._sprints_by_id[sprint["id"]] = sprint
+            iterations = self._client.get_paginated(
+                f"/spaces/{space_uid}/iterations", params={"status": "planned,active,closed"}
+            ) or []
+            for iteration in iterations:
+                # the cards endpoint returns all cards at once: it ignores limit and offset
+                iteration["card_records"] = self._client.get(
+                    f"/spaces/{space_uid}/iterations/{iteration['id']}/cards"
+                ) or []
+        except Exception as exc:
+            if _status_code(exc) == 402:
+                logger.info(f"Iterations are not available for space {space_uid}")
+            else:
+                logger.exception(f"Failed to fetch iterations of space {space_uid}, its boards are exported without them")
+            return []
+        return iterations
 
     def resolve_sprint(self, sprint_id: Any) -> Optional[Dict[str, Any]]:
         return self._sprints_by_id.get(sprint_id)
@@ -166,3 +216,12 @@ class KaitenDataFetcher:
         except Exception:
             logger.exception(f"Failed to fetch {endpoint}")
             return None
+
+
+def _status_code(exc: BaseException) -> Optional[int]:
+    """HTTP status of a failed request: the client wraps `requests.HTTPError` into `Exception`."""
+    while exc is not None:
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return exc.response.status_code
+        exc = exc.__cause__
+    return None

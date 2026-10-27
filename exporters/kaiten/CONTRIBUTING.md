@@ -27,5 +27,9 @@ Replace the bracketed text as follows:
 
 It is enough to provide us with such notification once.
 
+### Tests
+Test data must be synthetic: do not copy identifiers, dates, names or the structure of boards from real
+Kaiten or Tracker organizations.
+
 ### Other questions
 If you have any questions, please write us at opensource-support@yandex-team.ru.
