@@ -202,8 +202,9 @@ class WorkflowImporter(GetOrCreateImporter):
         return prepared
 
     def _prepare_steps_data(self, steps_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [
-            {
+        steps: Dict[str, Dict[str, Any]] = {}
+        for step in steps_data:
+            prepared = {
                 "status": self._mapper.get_status(step["status"]),
                 "actions": [self._prepare_action_data(action) for action in step.get("actions", [])],
                 "metaAction": self._prepare_action_data(step.get("metaAction", {})),
@@ -212,8 +213,30 @@ class WorkflowImporter(GetOrCreateImporter):
                     if step.get("afterCommentCreated") else {}
                 ),
             }
-            for step in steps_data
-        ]
+            first = steps.setdefault(prepared["status"], prepared)
+            if first is not prepared:
+                self._merge_step(first, prepared)
+        return list(steps.values())
+
+    @staticmethod
+    def _merge_step(first: Dict[str, Any], other: Dict[str, Any]) -> None:
+        """Шаг статуса, с которым сопоставлены несколько статусов выгрузки: воркфлоу принимает один шаг
+        на статус. Переходы объединяются; переход в статус и функции после комментария берутся у
+        первого шага, у которого они есть."""
+        status = first["status"]
+        first["actions"] += [action for action in other["actions"] if action not in first["actions"]]
+        dropped = []
+        for setting in ("metaAction", "afterCommentCreated"):
+            if not other.get(setting):
+                continue
+            if not first.get(setting):
+                first[setting] = other[setting]
+            elif first[setting] != other[setting]:
+                dropped.append(setting)
+        logger.warning(
+            f"Workflow steps of status {status} are merged into one"
+            + (f", {', '.join(dropped)} of the next steps are dropped" if dropped else "")
+        )
 
     def _prepare_screen(self, screen_data: Dict[str, Any]) -> Dict[str, Any]:
         prepared = {
@@ -465,16 +488,25 @@ class QueueImporter(GetOrCreateImporter):
         })
 
     def _prepare_issue_types_config_data(self, issue_types_config: List[Dict[str, Any]], queue_key: str) -> List[Dict[str, Any]]:
-        return [
-            {
-                "issueType": self._mapper.get_issue_type(issue_type_config["issueType"]),
-                "workflow": _get_workflow_id(self._mapper.get_queue(queue_key), issue_type_config["workflow"]),
-                "resolutions": [
-                    self._mapper.get_resolution(r)
-                    for r in issue_type_config.get("resolutions", [])
-                ],
-            } for issue_type_config in issue_types_config
-        ]
+        configs: Dict[str, Dict[str, Any]] = {}
+        for issue_type_config in issue_types_config:
+            issue_type = self._mapper.get_issue_type(issue_type_config["issueType"])
+            workflow = _get_workflow_id(self._mapper.get_queue(queue_key), issue_type_config["workflow"])
+            resolutions = [self._mapper.get_resolution(r) for r in issue_type_config.get("resolutions", [])]
+            if issue_type in configs:
+                # типы выгрузки сопоставлены с одним типом: у очереди одна настройка на тип, резолюции объединяются
+                first = configs[issue_type]
+                first["resolutions"] += [r for r in resolutions if r not in first["resolutions"]]
+                if first["workflow"] == workflow:
+                    continue
+                logger.error(
+                    f"Issue type {issue_type_config['issueType']} of queue {queue_key} is mapped to {issue_type} "
+                    f"configured by an earlier entry, its workflow {issue_type_config.get('workflow')} is not used: "
+                    "its issues in statuses missing from the kept workflow are not imported"
+                )
+                continue
+            configs[issue_type] = {"issueType": issue_type, "workflow": workflow, "resolutions": resolutions}
+        return list(configs.values())
 
     def _get_object(self, data: Dict[str, Any]) -> Optional[Resource]:
         return self._client.queues.get(self._mapper.get_queue(data["key"]))

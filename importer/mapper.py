@@ -29,11 +29,23 @@ class EntityMapper:
     def get_status(self, status_key: Optional[str]) -> Optional[str]:
         return self._get_mapping_value(self._statuses_map, status_key)
 
+    def is_status_mapped(self, status_key: str) -> bool:
+        return status_key in self._statuses_map
+
+    def map_status(self, status_key: str, target_key: str) -> None:
+        self._statuses_map[status_key] = target_key
+
     def get_resolution(self, resolution_key: Optional[str]) -> Optional[str]:
         return self._get_mapping_value(self._resolutions_map, resolution_key)
 
     def get_issue_type(self, issue_type_key: Optional[str]) -> Optional[str]:
         return self._get_mapping_value(self._issue_types_map, issue_type_key)
+
+    def is_issue_type_mapped(self, issue_type_key: str) -> bool:
+        return issue_type_key in self._issue_types_map
+
+    def map_issue_type(self, issue_type_key: str, target_key: str) -> None:
+        self._issue_types_map[issue_type_key] = target_key
 
     def get_priority(self, priority_key: Optional[str]) -> Optional[str]:
         return self._get_mapping_value(self._priorities_map, priority_key)

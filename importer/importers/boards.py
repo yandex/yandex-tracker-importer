@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.exceptions import BadRequest, Forbidden, NotFound, UnprocessableEntity
@@ -222,7 +222,12 @@ class BoardImporter:
             return
         try:
             existing = {str(note.get("columnId")) for note in self._client.boards[board.id].notes.get_all()}
+            # колонка выгрузки без оставшихся статусов на доске не создаётся
+            columns = {str(column.id) for column in self._client.boards[board.id].columns.get_all()}
             for note in notes:
+                if str(note["column"]) not in columns:
+                    logger.info(f"Note of column {note['column']} of board {board.id} is skipped: the board has no such column")
+                    continue
                 if str(note["column"]) not in existing:
                     self._client.boards[board.id].notes.create_for_column(note["column"], note.get("text"))
         except Exception:
@@ -235,15 +240,7 @@ class BoardImporter:
             "boardPermissionsTemplate": "private",
             "sprintsAvailable": bool(board_data.get("sprintsAvailable")),
             "backlogAvailable": bool(board_data.get("sprintsAvailable")),
-            "columns": [
-                {
-                    "id": column["id"],
-                    "name": column["name"],
-                    "statuses": [self._get_status(status) for status in column.get("statuses") or []],
-                    **({"limit": column["limit"]} if column.get("limit") else {}),
-                }
-                for column in board_data.get("columns") or []
-            ],
+            "columns": self._prepare_columns(board_data),
             "autoFilters": {
                 **({"addFilter": self._prepare_add_filter(auto_filters["addFilter"])} if auto_filters.get("addFilter") else {}),
                 **(
@@ -255,6 +252,36 @@ class BoardImporter:
         if board_data.get("estimateBy"):
             prepared["estimateBy"] = self._global_field_importer.get_or_create(board_data["estimateBy"]).id
         return prepared
+
+    def _prepare_columns(self, board_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """API не принимает один статус в нескольких колонках и колонку без статусов: статус, с
+        которым сопоставлены статусы выгрузки из разных колонок, остаётся в первой из них, а колонка
+        без оставшихся статусов не создаётся."""
+        columns, used = [], set()
+        for column in board_data.get("columns") or []:
+            statuses = []
+            for status in column.get("statuses") or []:
+                status = self._get_status(status)
+                if status in statuses:
+                    continue
+                if status in used:
+                    logger.warning(
+                        f"Status {status} of board {board_data['name']} is already in an earlier column, "
+                        f"it is not added to column {column['name']}"
+                    )
+                    continue
+                statuses.append(status)
+            if column.get("statuses") and not statuses:
+                logger.warning(f"Column {column['name']} of board {board_data['name']} has no statuses left, it is not created")
+                continue
+            used.update(statuses)
+            columns.append({
+                "id": column["id"],
+                "name": column["name"],
+                "statuses": statuses,
+                **({"limit": column["limit"]} if column.get("limit") else {}),
+            })
+        return columns
 
     def _prepare_add_filter(self, add_filter: Dict[str, Any]) -> Dict[str, Any]:
         """Условие, которое не удаётся перенести, — ошибка: без него на доску попадали бы лишние
@@ -290,7 +317,7 @@ class BoardImporter:
     def _prepare_remove_filter(self, remove_filter: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "enabled": remove_filter.get("enabled", True),
-            "statuses": [self._get_status(status) for status in remove_filter.get("statuses") or []],
+            "statuses": list(dict.fromkeys(self._get_status(status) for status in remove_filter.get("statuses") or [])),
             "checkResolutionPresence": remove_filter.get("checkResolutionPresence"),
             "maxTimeInToRemoveState": remove_filter.get("maxTimeInToRemoveState"),
         }

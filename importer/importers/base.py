@@ -1,7 +1,9 @@
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from collections import defaultdict
+from typing import Any, Dict, Optional, Tuple
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
@@ -28,16 +30,22 @@ class GetOrCreateImporter(ABC):
         return self._try_creating_object(input_data)
 
     def _try_getting_object(self, input_data: Any) -> Optional[Resource]:
+        obj, _ = self._search_object(input_data)
+        return obj
+
+    def _search_object(self, input_data: Any) -> Tuple[Optional[Resource], bool]:
+        """Найденный объект и признак ответа «не найден»."""
         try:
             obj = self._get_object(input_data)
             if obj is not None:
                 logger.info(f"The object {self.object_name} with data {input_data} exists")
-                return obj
+            return obj, False
         except NotFound:
             logger.info(f"The {self.object_name} with data {input_data} was not found, trying to create")
+            return None, True
         except Exception:
             logger.exception(f"Error searching {self.object_name} with data: {input_data}")
-        return None
+            return None, False
 
     def _try_creating_object(self, input_data: Any) -> Optional[Resource]:
         try:
@@ -108,6 +116,9 @@ class GlobalObjectImporter(CachedImporter, ABC):
 
     def __init__(self, client: TrackerClient, mapper: EntityMapper, data_path: str):
         super().__init__(client, mapper)
+        # get_or_create вызывается из потоков импорта задач
+        self._key_locks = defaultdict(threading.Lock)
+        self._key_locks_guard = threading.Lock()
         global_object_path = os.path.join(data_path, self._filename)
         self._objects_data = (
             self._load_objects_data(global_object_path)
@@ -123,21 +134,36 @@ class GlobalObjectImporter(CachedImporter, ABC):
         }
 
     def get_or_create(self, key: str) -> Optional[Resource]:
-        obj = self._try_getting_object(key)
+        obj = self.get_from_cache(self._get_key(key))
         if obj is not None:
+            return obj
+
+        # один ключ организации обрабатывается одним потоком за раз
+        with self._key_locks_guard:
+            key_lock = self._key_locks[self._get_key(key)]
+        with key_lock:
+            obj, not_found = self._search_object(key)
+            if obj is not None:
+                self._put_to_cache(self._get_key(key), obj)
+                return obj
+
+            if key not in self._objects_data:
+                logger.error(f"{self.object_name} with key {key} not found in {self._filename}")
+                raise self.error_class(key)
+
+            # ключа нет в организации: название может быть занято другим объектом
+            obj = self._find_by_name(self._objects_data[key]) if not_found else None
+            if obj is None:
+                obj = self._try_creating_object(self._objects_data[key])
+            if obj is None:
+                raise self.error_class(key)
+
             self._put_to_cache(self._get_key(key), obj)
             return obj
 
-        if key not in self._objects_data:
-            logger.error(f"{self.object_name} with key {key} not found in {self._filename}")
-            raise self.error_class(key)
-
-        obj = self._try_creating_object(self._objects_data[key])
-        if obj is None:
-            raise self.error_class(key)
-
-        self._put_to_cache(self._get_key(key), obj)
-        return obj
+    def _find_by_name(self, input_data: Dict[str, Any]) -> Optional[Resource]:
+        """Существующий объект, с которым сопоставляется ключ выгрузки; None — объект создаётся."""
+        return None
 
     @property
     @abstractmethod
