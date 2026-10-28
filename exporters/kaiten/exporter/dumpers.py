@@ -33,6 +33,10 @@ ARCHIVE_TAG = "Архив Kaiten"
 # characters kept as is in a link url; "(", ")" and spaces are percent-encoded
 URL_SAFE_CHARS = ":/?#@!$&'*+,;=%-._~"
 
+# a blocked card is an issue with this tag; a blocker reason becomes a comment
+BLOCKED_TAG = "Заблокировано в Kaiten"
+BLOCKER_COMMENT_PREFIX = "Заблокировано: "
+
 # heading of the description list of files linked from external storages
 EXTERNAL_FILES_HEADER = "Файлы по ссылкам:"
 
@@ -325,6 +329,10 @@ def markdown_link(name: Optional[str], url: Optional[str]) -> str:
     return f"[{label}]({quote(url, safe=URL_SAFE_CHARS)})"
 
 
+def active_blockers(card: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [blocker for blocker in card.get("blockers") or [] if not blocker.get("released")]
+
+
 def is_archived(card: Dict[str, Any]) -> bool:
     """Kaiten card conditions: 1 — on the board, 2 — archived."""
     return bool(card.get("archived")) or card.get("condition") == 2
@@ -531,6 +539,10 @@ class CardDumper(BaseDumper):
 
     _STANDARD_TYPE = "task"
     _STANDARD_PRIORITY = "normal"
+    # priority of a Kaiten ASAP card
+    _ASAP_PRIORITY = "critical"
+    # length limit of a checklist item text in Tracker
+    _CHECKLIST_ITEM_LIMIT = 2000
     # Kaiten card states: 1 — queued, 2 — in progress, 3 — done
     _DONE_STATE = 3
 
@@ -581,7 +593,7 @@ class CardDumper(BaseDumper):
             "updatedBy": updated_by,
             **self._prepare_resolution(card, updated_by),
             "type": self._type_keys.get(card.get("type_id"), self._STANDARD_TYPE),
-            "priority": self._STANDARD_PRIORITY,
+            "priority": self._ASAP_PRIORITY if card.get("asap") else self._STANDARD_PRIORITY,
             "status": self._prepare_status(card, status_by_column_id or {}),
             "description": self._prepare_description(card),
             **self._prepare_dates(card),
@@ -589,7 +601,10 @@ class CardDumper(BaseDumper):
             "assignee": self._prepare_assignee(card),
             "followers": self._prepare_members(card),
             "checklistItems": self._prepare_checklists(card.get("checklists", [])),
-            "comments": self._prepare_comments(card.get("comments", [])),
+            "comments": sorted(
+                self._prepare_comments(card) + self._prepare_blocker_comments(card, created_by),
+                key=lambda comment: comment.get("createdAt") or "",
+            ),
             "attachments": self._prepare_attachments(stored_files(card)),
             "worklogs": self._prepare_worklogs(card.get("time_logs", [])),
             "storyPoints": card.get("size"),
@@ -635,8 +650,8 @@ class CardDumper(BaseDumper):
         return {"resolution": RESOLUTION_KEY, "resolvedAt": resolved_at, "resolvedBy": resolved_by}
 
     def _prepare_updated_at(self, card: Dict[str, Any], related_created_at: List[Any]) -> Optional[str]:
-        """The latest date of the card, including its completion, and of its comments, files, time logs and related
-        cards."""
+        """The latest date of the card, including its completion, and of its comments, files, time logs, active
+        blockers and related cards."""
         dates = [
             card.get("created"), card.get("updated"), card.get("last_moved_to_done_at"), card.get("completed_at"),
             *related_created_at,
@@ -645,6 +660,7 @@ class CardDumper(BaseDumper):
             dates += [comment.get("created"), comment.get("updated")]
         dates += [file.get("created") for file in card.get("files") or []]
         dates += [log.get("created") for log in card.get("time_logs") or []]
+        dates += [blocker.get("created") for blocker in active_blockers(card)]
         return latest_tracker_datetime(dates)
 
     def _prepare_assignee(self, card: Dict[str, Any]) -> Optional[str]:
@@ -669,6 +685,8 @@ class CardDumper(BaseDumper):
         tags = [tag.get("name") for tag in card.get("tags", []) if tag.get("name")]
         if sprint_tag:
             tags.append(sprint_tag)
+        if card.get("blocked") or active_blockers(card):
+            tags.append(BLOCKED_TAG)
         if is_archived(card):
             tags.append(ARCHIVE_TAG)
         elif ARCHIVE_TAG in tags:
@@ -686,47 +704,57 @@ class CardDumper(BaseDumper):
             "end": to_local_date(card.get("planned_end"), timezone, midnight_utc_is_date=True),
         }
 
-    def _prepare_description(self, card: Dict[str, Any]) -> Optional[str]:
-        description = card.get("description") or ""
-        # Rewrite embedded file links to the local ``[filename]()`` form the importer
-        # resolves against the attachments directory.
+    @staticmethod
+    def _rewrite_file_links(text: str, card: Dict[str, Any]) -> str:
+        """Links to files of the card in the local ``[filename]()`` form the importer resolves against the
+        attachments of the issue."""
         for file in stored_files(card):
             url = file.get("url")
             if not url:
                 continue
             local_name = prepare_attachment_filename(file.get("name", "file"), str(file.get("id")))
             escaped = re.escape(url)
-            description = re.sub(
-                rf"!\[[^\]]*\]\({escaped}[^)]*\)", f"![{local_name}]()", description
-            )
-            description = re.sub(
-                rf"(?<!!)\[[^\]]*\]\({escaped}[^)]*\)", f"[{local_name}]()", description
-            )
+            # the url is followed by a query, a fragment or a title only: a longer url is another file
+            tail = r"(?:[?#\s][^)]*)?"
+            # a function keeps backslashes of the name literal
+            text = re.sub(rf"!\[[^\]]*\]\({escaped}{tail}\)", lambda _, name=local_name: f"![{name}]()", text)
+            text = re.sub(rf"(?<!!)\[[^\]]*\]\({escaped}{tail}\)", lambda _, name=local_name: f"[{name}]()", text)
+        return text
+
+    def _prepare_description(self, card: Dict[str, Any]) -> Optional[str]:
+        description = self._rewrite_file_links(card.get("description") or "", card)
         links = [f"- {markdown_link(file.get('name'), file.get('url'))}" for file in linked_files(card)]
         if links:
             description = "\n\n".join(filter(None, [description, EXTERNAL_FILES_HEADER + "\n" + "\n".join(links)]))
         return description or None
 
     def _prepare_checklists(self, checklists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Tracker has one checklist per issue: with several checklists an item starts with its checklist name
+        named = len([checklist for checklist in checklists if checklist.get("items")]) > 1
         result = []
         for checklist in sorted(checklists, key=lambda c: c.get("sort_order", 0)):
+            prefix = f"{checklist['name']}: " if named and checklist.get("name") else ""
             for item in sorted(checklist.get("items", []), key=lambda i: i.get("sort_order", 0)):
                 checked = item.get("checked")
                 if checked is None:
                     checked = item.get("completed")
+                text = item.get("text") or item.get("name")
+                if text and prefix and len(prefix + text) <= self._CHECKLIST_ITEM_LIMIT:
+                    text = prefix + text
                 result.append({
-                    "text": item.get("text") or item.get("name"),
+                    "text": text,
                     "checked": bool(checked),
                     "assignee": self._prepare_user(item.get("responsible")),
                     "deadline": to_tracker_datetime(item.get("due_date")),
                 })
         return result
 
-    def _prepare_comments(self, comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _prepare_comments(self, card: Dict[str, Any]) -> List[Dict[str, Any]]:
         result = []
-        for comment in comments:
+        for comment in card.get("comments") or []:
             data = {
-                "text": comment.get("text"),
+                # a file of a comment is a file of the card linked from the comment text
+                "text": self._rewrite_file_links(comment.get("text") or "", card) or comment.get("text"),
                 "createdBy": self._prepare_user(comment.get("author")),
                 "createdAt": to_tracker_datetime(comment.get("created")),
             }
@@ -736,6 +764,20 @@ class CardDumper(BaseDumper):
                 data["updatedAt"] = to_tracker_datetime(updated_at)
             result.append(data)
         return result
+
+    def _prepare_blocker_comments(self, card: Dict[str, Any], card_author: Optional[str]) -> List[Dict[str, Any]]:
+        # a blocker of an unknown user is commented by the card author: a comment without an author is not imported
+        return [
+            {
+                "text": BLOCKER_COMMENT_PREFIX + blocker["reason"],
+                "createdBy": self._prepare_user(blocker.get("blocker"))
+                or self._prepare_user(self._fetcher.resolve_user(blocker.get("blocker_id")))
+                or card_author,
+                "createdAt": to_tracker_datetime(blocker.get("created") or card.get("created")),
+            }
+            for blocker in active_blockers(card)
+            if blocker.get("reason")
+        ]
 
     def _prepare_attachments(self, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result = []
@@ -756,11 +798,7 @@ class CardDumper(BaseDumper):
         """Parent/child relations and active blockers of a card, one direction only: the importer
         creates the reciprocal link."""
         targets = [(child_id, "is parent task for") for child_id in card.get("children_ids") or []]
-        targets += [
-            (blocker.get("blocker_card_id"), "depends on")
-            for blocker in card.get("blockers") or []
-            if not blocker.get("released")
-        ]
+        targets += [(blocker.get("blocker_card_id"), "depends on") for blocker in active_blockers(card)]
         return targets
 
     def _prepare_links(
