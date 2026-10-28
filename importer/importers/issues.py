@@ -66,6 +66,19 @@ class IssueImporter(GetOrCreateImporter):
     def get_or_create(self, input_data: Dict[str, Any], attachments_path: str) -> Tuple[Optional[Resource], bool]:
         issue_obj = self._try_getting_object(input_data)
         if issue_obj is not None:
+            # у существующей задачи собираются связи с задачами, с которыми она ещё не связана
+            if not input_data.get("links"):
+                return issue_obj
+            try:
+                linked_keys = linked_issue_keys(issue_obj)
+            except Exception:
+                logger.exception(f"Error loading links of issue {issue_obj.key}, its links are skipped")
+                return issue_obj
+            missing_links = [
+                link for link in input_data.get("links") or []
+                if self._mapper.get_issue_key(link.get("issue")) not in linked_keys
+            ]
+            self._issue_links_collector.add_issue_links(issue_obj, missing_links)
             return issue_obj
 
         attachments_data = input_data.pop("attachments", [])
@@ -391,3 +404,9 @@ class IssueImporter(GetOrCreateImporter):
         # get most recent timestamp from input data
         options = {input_data[field_key] for field_key in ("updatedAt", "resolvedAt") if input_data.get(field_key)}
         return max(options) if options else None
+
+
+def linked_issue_keys(issue_obj: Resource) -> set:
+    """Ключи задач, с которыми задача связана. У пары задач одна связь: связь другого типа,
+    созданная через `links.create`, заменяет существующую."""
+    return {link.object.key for link in issue_obj.links}

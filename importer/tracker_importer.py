@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 from yandex_tracker_client import TrackerClient
+from yandex_tracker_client.exceptions import Conflict, NotFound
 from yandex_tracker_client.objects import Resource
 
 from .constants import DEFAULT_TRACKER_UI_URL
@@ -41,7 +42,7 @@ from .importers.entities import (
     GoalImporter,
     PortfolioImporter
 )
-from .importers.issues import IssueImporter
+from .importers.issues import IssueImporter, linked_issue_keys
 from .exceptions import (
     WorkflowNotCreatedError,
     LocalFieldNotCreatedError,
@@ -592,9 +593,32 @@ class TrackerImporter:
 
         try:
             return issue_obj.links.import_object(**prepared_data)
+        except Conflict:
+            # 409: у пары задач уже есть связь, у задачи уже есть родитель или эпик либо связь ведёт на саму задачу
+            try:
+                linked = prepared_data["issue"] in linked_issue_keys(issue_obj)
+            except Exception:
+                logger.exception(f"Issue link {issue_obj.key} -> {prepared_data['issue']} is not imported")
+                return None
+            if linked:
+                logger.info(f"Issue link {issue_obj.key} -> {prepared_data['issue']} is not imported: the issues are already linked")
+            else:
+                logger.warning(
+                    f"Issue link {issue_obj.key} -> {prepared_data['issue']} is not imported: "
+                    f"it conflicts with an existing link, parent or epic"
+                )
+            return None
+        except NotFound:
+            # 404: задачи на другом конце связи нет; links.create отвечает так же
+            logger.warning(f"Issue link {issue_obj.key} -> {prepared_data['issue']} is not imported: the issue is not found")
+            return None
         except Exception:
             logger.warning(f"Error importing issue link: {issue_obj.key} -> {prepared_data.get('issue')}")
         try:
+            # links.create заменяет связь пары задач и вызывается, только если связи у пары нет
+            if prepared_data["issue"] in linked_issue_keys(issue_obj):
+                logger.info(f"Issue link {issue_obj.key} -> {prepared_data['issue']} is not imported: the issues are already linked")
+                return None
             logger.info(f"Attempt to create issue link {prepared_data}")
             return issue_obj.links.create(
                 **{

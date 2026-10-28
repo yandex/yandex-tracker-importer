@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import List, Dict, Any
 
 from yandex_tracker_client.objects import Resource
@@ -10,29 +11,34 @@ logger = logging.getLogger(__name__)
 
 
 class LinksCollector:
+    """Собирает связи для создания после всех объектов. У пары объектов одна связь: встречная
+    связь пары, записанная у второго объекта, и повтор связи пропускаются."""
+
     def __init__(self, key_field: str, key_extractor: callable = None):
         self._links = {}
-        self._processed_keys = set()
+        self._pairs = set()
+        self._lock = threading.Lock()
         self._key_field = key_field
         self._key_extractor = key_extractor or (lambda x: x)
 
     def add_links(self, source: Any, links: List[Dict[str, Any]]) -> None:
+        source_key = source.key if hasattr(source, 'key') else source
         unique_links = []
-        for link_data in links:
-            if self._key_field not in link_data:
-                logger.warning(
-                    f"Link for {source} is missing required '{self._key_field}' field: {link_data}"
-                )
-                continue
+        with self._lock:
+            for link_data in links:
+                if self._key_field not in link_data:
+                    logger.warning(
+                        f"Link for {source} is missing required '{self._key_field}' field: {link_data}"
+                    )
+                    continue
 
-            target_key = self._key_extractor(link_data[self._key_field])
-            if target_key not in self._processed_keys:
-                unique_links.append(link_data)
+                pair = frozenset((source_key, self._key_extractor(link_data[self._key_field])))
+                if pair not in self._pairs:
+                    self._pairs.add(pair)
+                    unique_links.append(link_data)
 
-        if unique_links:
-            source_key = source.key if hasattr(source, 'key') else source
-            self._processed_keys.add(source_key)
-            self._links[source] = unique_links
+            if unique_links:
+                self._links[source] = unique_links
 
     @property
     def collected_links(self) -> Dict[Any, List[Dict[str, Any]]]:
