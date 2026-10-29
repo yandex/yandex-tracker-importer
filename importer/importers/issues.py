@@ -1,10 +1,11 @@
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
-from yandex_tracker_client.exceptions import BadRequest, Forbidden
+from yandex_tracker_client.exceptions import BadRequest, Forbidden, UnprocessableEntity
 
 from .base import GetOrCreateImporter
 from .boards import BoardImporter
@@ -19,6 +20,7 @@ from ..text_normalizer import TextNormalizer
 from ..tracker_collections import create_checklist_item
 from ..utils import (
     datetime_to_str,
+    duration_to_ms,
     str_to_datetime,
     prepare_checklist_item_data,
     map_custom_user_field_value,
@@ -58,6 +60,7 @@ class IssueImporter(GetOrCreateImporter):
         self._project_importer = project_importer
         self._goal_importer = goal_importer
         self._issue_links_collector = issue_links_collector
+        self._myself = None
 
     @property
     def object_name(self) -> str:
@@ -86,6 +89,7 @@ class IssueImporter(GetOrCreateImporter):
         worklogs_data = input_data.pop("worklogs", [])
         comments_data = input_data.pop("comments", [])
         links = input_data.pop("links", [])
+        self._add_worklogs_spent(input_data, worklogs_data)
 
         issue_obj = self._try_creating_object(input_data)
         if issue_obj is not None:
@@ -103,6 +107,17 @@ class IssueImporter(GetOrCreateImporter):
             self._issue_links_collector.add_issue_links(issue_obj, links)
 
         return issue_obj
+
+    def _add_worklogs_spent(self, input_data: Dict[str, Any], worklogs_data: List[Dict[str, Any]]) -> None:
+        """Задаёт `spent` задачи суммой `duration` создаваемых ворклогов, если `spent` нет в выгрузке: импорт ворклога
+        затраченное время не меняет."""
+        if input_data.get("spent") is not None:
+            return
+        spent = sum(
+            duration_to_ms(worklog["duration"]) for worklog in worklogs_data if self._is_importable_worklog(worklog)
+        )
+        if spent:
+            input_data["spent"] = spent
 
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         issue_key = self._mapper.get_issue_key(input_data["key"])
@@ -343,10 +358,67 @@ class IssueImporter(GetOrCreateImporter):
                 logger.exception(f"Error in preparing worklog data for issue {issue_obj.key}: {worklog}")
                 continue
 
-            try:
-                issue_obj.worklog.create(**prepared_data)
-            except Exception:
-                logger.exception(f"Error creating worklog for issue {issue_obj.key} with data: {prepared_data}")
+            if duration_to_ms(worklog["duration"]) is None:
+                logger.warning(f"Worklog for issue {issue_obj.key} has an invalid duration, it is skipped: {worklog}")
+                continue
+            self._import_worklog(issue_obj, worklog, prepared_data)
+
+    def _is_importable_worklog(self, worklog: Dict[str, Any]) -> bool:
+        """Ворклоги создаются импортом: импорт сохраняет автора и дату создания и не меняет затраченное время задачи.
+        Ворклог без разборчивых `start` и `duration` не создаётся."""
+        if not worklog.get("start") or duration_to_ms(worklog.get("duration")) is None:
+            return False
+        try:
+            str_to_datetime(worklog["start"])
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _import_worklog(self, issue_obj: Resource, worklog: Dict[str, Any], prepared_data: Dict[str, Any]) -> None:
+        """Импорт в две попытки: от имени `createdBy`, после отказа 400 или 422 — от имени пользователя, выполняющего
+        импорт. Ворклог без `createdBy` импортируется от имени пользователя, выполняющего импорт, одной попыткой."""
+        created_at = worklog.get("createdAt")
+        try:
+            valid_created_at = bool(created_at) and str_to_datetime(created_at) is not None
+        except (TypeError, ValueError):
+            valid_created_at = False
+        if not valid_created_at:
+            if created_at:
+                logger.warning(f"Worklog for issue {issue_obj.key} has an invalid creation date: {worklog}")
+            created_at = datetime_to_str(datetime.now(timezone.utc))
+
+        try:
+            import_account = str(self._get_myself().uid)
+        except Exception:
+            logger.exception(f"Error getting the import account, worklog for issue {issue_obj.key} is skipped: {worklog}")
+            return
+        created_by = self._mapper.get_user(worklog.get("createdBy")) or import_account
+        try:
+            issue_obj.worklog.import_object(createdBy=created_by, createdAt=created_at, **prepared_data)
+            return
+        except (BadRequest, UnprocessableEntity):
+            if created_by == import_account:
+                logger.exception(f"Error importing worklog for issue {issue_obj.key} with data: {prepared_data}")
+                return
+            # отказ без сохранения ворклога, например автора нет в организации
+            logger.warning(
+                f"Worklog for issue {issue_obj.key} is not imported as {created_by}, "
+                f"importing it as the import account: {prepared_data}"
+            )
+        except Exception:
+            # ворклог может быть уже сохранён: повтор не выполняется
+            logger.exception(f"Error importing worklog for issue {issue_obj.key} with data: {prepared_data}")
+            return
+
+        try:
+            issue_obj.worklog.import_object(createdBy=import_account, createdAt=created_at, **prepared_data)
+        except Exception:
+            logger.exception(f"Error importing worklog for issue {issue_obj.key} with data: {prepared_data}")
+
+    def _get_myself(self) -> Resource:
+        if self._myself is None:
+            self._myself = self._client.myself
+        return self._myself
 
     def _create_comments(self, comments_data: List[Dict[str, Any]], issue_obj: Resource, text_normalizer: TextNormalizer) -> None:
         issue_created_at = str_to_datetime(issue_obj.createdAt)

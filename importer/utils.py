@@ -1,9 +1,11 @@
 import logging
+import math
+import re
 import time
 import yaml
 from datetime import datetime
 from functools import wraps
-from typing import Any, Callable, Dict, Type, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Type, Tuple, Union
 
 from yandex_tracker_client.objects import Resource
 
@@ -45,6 +47,40 @@ def str_to_datetime(date_str: str) -> datetime:
     if date_str is None:
         return None
     return datetime.strptime(date_str, DATE_PATTERN)
+
+
+# рабочий календарь Трекера: день — 8 часов, неделя — 5 дней
+_MS_PER_HOUR = 3600 * 1000
+_MS_PER_WORKING_DAY = 8 * _MS_PER_HOUR
+_MS_PER_WORKING_WEEK = 5 * _MS_PER_WORKING_DAY
+_DURATION_PATTERN = re.compile(
+    r"P(?:(?P<weeks>\d+)W)?(?:(?P<days>\d+)D)?"
+    r"(?:T(?=\d)(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?"
+)
+
+
+def duration_to_ms(duration: Any) -> Optional[int]:
+    """Длительность в миллисекундах: положительное число (дробная часть отбрасывается) или строка ISO 8601 с неделями,
+    днями, часами, минутами и секундами (`P1DT2H`); дробными могут быть только секунды. Для другого значения — `None`."""
+    if isinstance(duration, bool):
+        return None
+    if isinstance(duration, (int, float)):
+        ms = int(duration) if math.isfinite(duration) else 0
+        return ms if ms > 0 else None
+    if not isinstance(duration, str):
+        return None
+    match = _DURATION_PATTERN.fullmatch(duration)
+    if match is None or duration == "P":
+        return None
+    parts = {name: float(value) for name, value in match.groupdict().items() if value}
+    ms = round(
+        parts.get("weeks", 0) * _MS_PER_WORKING_WEEK
+        + parts.get("days", 0) * _MS_PER_WORKING_DAY
+        + parts.get("hours", 0) * _MS_PER_HOUR
+        + parts.get("minutes", 0) * 60 * 1000
+        + parts.get("seconds", 0) * 1000
+    )
+    return ms if ms > 0 else None
 
 
 def datetime_to_str(datetime_obj: datetime) -> str:
