@@ -469,16 +469,18 @@ class QueueImporter(GetOrCreateImporter):
         return "Queue"
 
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        default_type = self._mapper.get_issue_type(input_data["defaultType"])
         return clean_empty({
             "key": self._mapper.get_queue(input_data["key"]),
             "name": input_data["name"],
-            "defaultType": self._mapper.get_issue_type(input_data["defaultType"]),
+            "defaultType": default_type,
             "defaultPriority": self._mapper.get_priority(input_data["defaultPriority"]),
             "lead": self._mapper.get_user(input_data["lead"]),
             "teamUsers": [self._mapper.get_user(u) for u in input_data.get("teamUsers", [])],
-            "issueTypesConfig": [  # default issue type config to be replaced later
+            # временная настройка, её заменяет import_issue_types_config; тип по умолчанию должен быть среди типов очереди
+            "issueTypesConfig": [
                 {
-                    "issueType": "task",
+                    "issueType": default_type,
                     "workflow": WorkflowImporter.DEFAULT_WORKFLOW_ID,
                 },
             ],
