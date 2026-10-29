@@ -542,7 +542,7 @@ class QueueImporter(GetOrCreateImporter):
     def update_permissions(self, queue_obj: Resource, queue_data: Dict[str, Any]) -> None:
         """
         Добавить разрешения к очереди, сохранив существующие.
-        Удалить группу "Все сотрудники", если её нет в импортируемых данных, чтобы избежать общего доступа при первичном импорте очереди.
+        Снять группу «Все сотрудники» с типов прав, на которых её нет в выгрузке, чтобы избежать общего доступа при первичном импорте очереди.
         Запрет доступа откладывается до конца импорта — см. `update_deny_permissions`.
         """
         incoming_permissions = queue_data.get("permissions")
@@ -550,6 +550,7 @@ class QueueImporter(GetOrCreateImporter):
             return
 
         permissions_changes = {}
+        removals = {}
         for permission_type in ["create", "read", "write", "writeNoAssign", "grant"]:
             if permission_type == "writeNoAssign" and permission_type not in incoming_permissions:
                 continue
@@ -558,24 +559,37 @@ class QueueImporter(GetOrCreateImporter):
             )
             groups_add = permissions_changes[permission_type]["groups"]["add"]
             if ALL_PARTICIPANTS_GROUP_ID not in groups_add:
-                permissions_changes[permission_type]["groups"]["remove"] = [ALL_PARTICIPANTS_GROUP_ID]
+                removals[permission_type] = {"groups": {"remove": [ALL_PARTICIPANTS_GROUP_ID]}}
 
         deny = clean_empty(self._prepare_permission_changes(incoming_permissions.get("deny") or {}, queue_obj.key, "deny"))
         if deny:
             self._pending_deny[queue_obj.key] = deny
 
+        # Снятие группы с одного типа прав снимает её и со связанных: с изменения — чтение, с чтения —
+        # изменение и изменение без назначения. Если группа выдаётся хотя бы на одном типе, снятие
+        # уходит отдельным запросом до выдачи, а выдача группе — следующим, без пользователей и ролей,
+        # на которых запрос может не пройти; иначе все изменения уходят одним запросом
+        granted = {
+            permission_type: {"groups": {"add": [ALL_PARTICIPANTS_GROUP_ID]}}
+            for permission_type in permissions_changes if permission_type not in removals
+        }
+        if not (removals and granted):
+            for permission_type, removal in removals.items():
+                permissions_changes[permission_type]["groups"].update(removal["groups"])
+            removals, granted = {}, {}
         permissions_changes = clean_empty(permissions_changes)
-        if not permissions_changes:
-            return
 
-        try:
-            self._client.queues[queue_obj.key].update_permissions(permissions_changes)
-            logger.info(f"Successfully updated permissions for queue {queue_obj.key}")
-        except Exception:
-            logger.exception(
-                f"Error updating permissions for queue {queue_obj.key} "
-                f"with data: {permissions_changes}"
-            )
+        queue = self._client.queues[queue_obj.key]
+        for stage, changes in (("removal of all employees", removals), ("grant to all employees", granted),
+                               ("permissions", permissions_changes)):
+            if not changes:
+                continue
+            try:
+                queue.update_permissions(changes)
+            except Exception:
+                logger.exception(f"Error updating permissions for queue {queue_obj.key} ({stage}) with data: {changes}")
+                return
+        logger.info(f"Successfully updated permissions for queue {queue_obj.key}")
 
     def lift_deny(self, queue_key: str) -> None:
         """Снимает с очереди субъекты запрета из выгрузки, через которые запрет действует на
