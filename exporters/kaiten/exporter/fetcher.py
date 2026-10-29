@@ -30,6 +30,10 @@ class KaitenDataFetcher:
         self._sprints_by_id: Dict[Any, Dict[str, Any]] = {}
         self._all_sprints: Optional[List[Dict[str, Any]]] = None
         self._space_uids_by_board: Optional[Dict[str, List[str]]] = None
+        self._spaces: Optional[List[Dict[str, Any]]] = None
+        self._spaces_loaded = False
+        self._space_users: Dict[Any, Optional[List[Dict[str, Any]]]] = {}
+        self._space_role_names: Optional[Dict[str, str]] = None
         self._iterations_by_space: Dict[str, List[Dict[str, Any]]] = {}
         self._current_user: Optional[Dict[str, Any]] = None
         self._timeline_timezone = "UTC"
@@ -127,13 +131,55 @@ class KaitenDataFetcher:
                 result.setdefault(iteration["id"], iteration)
         return list(result.values())
 
+    def spaces(self) -> Optional[List[Dict[str, Any]]]:
+        """All spaces, nested ones included; None when they are not loaded."""
+        if not self._spaces_loaded:
+            self._spaces_loaded = True
+            try:
+                self._spaces = self._client.get("/spaces") or []
+            except Exception:
+                logger.exception("Failed to fetch spaces, boards are exported without iterations and access")
+        return self._spaces
+
+    def board_spaces(self, board_id: str) -> List[Dict[str, Any]]:
+        """Spaces showing the board and their parent spaces: access to a space covers its nested spaces."""
+        spaces = self.spaces() or []
+        by_uid = {space.get("uid"): space for space in spaces}
+        result = {}
+        for space in spaces:
+            if not any(str(board.get("id")) == str(board_id) for board in space.get("boards") or []):
+                continue
+            while space is not None and space.get("uid") not in result:
+                result[space.get("uid")] = space
+                space = by_uid.get(space.get("parent_entity_uid"))
+        return list(result.values())
+
+    def space_users(self, space_id: Any) -> Optional[List[Dict[str, Any]]]:
+        """Members of a space with their own roles, without members of parent spaces; None when they are not
+        loaded."""
+        if space_id not in self._space_users:
+            try:
+                # an empty answer is not an empty list of members
+                self._space_users[space_id] = self._client.get(f"/spaces/{space_id}/users")
+            except Exception:
+                logger.exception(f"Failed to fetch members of space {space_id}")
+                self._space_users[space_id] = None
+        return self._space_users[space_id]
+
+    def space_role_names(self) -> Dict[str, str]:
+        """Names of space roles by id: `reader`, `writer`, `admin` and others."""
+        if self._space_role_names is None:
+            try:
+                roles = self._client.get("/tree-entity-roles") or []
+                self._space_role_names = {role.get("id"): role.get("name") for role in roles}
+            except Exception:
+                logger.exception("Failed to fetch space roles, access to boards is not exported")
+                self._space_role_names = {}
+        return self._space_role_names
+
     def _space_uids(self, board_id: str) -> List[str]:
         if self._space_uids_by_board is None:
-            try:
-                spaces = self._client.get("/spaces") or []
-            except Exception:
-                logger.exception("Failed to fetch spaces, boards are exported without iterations")
-                spaces = []
+            spaces = self.spaces() or []
             self._space_uids_by_board = defaultdict(list)
             for space in spaces:
                 for board in space.get("boards") or []:

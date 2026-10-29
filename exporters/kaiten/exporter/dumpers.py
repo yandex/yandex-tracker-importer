@@ -97,7 +97,10 @@ class BoardToProjectDumper(BaseDumper):
     def _filename(self) -> str:
         return "project.yaml"
 
-    def dump(self, board: Dict[str, Any], dump_path: str, created_by: Optional[str] = None) -> None:
+    def dump(
+        self, board: Dict[str, Any], dump_path: str, created_by: Optional[str] = None,
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> None:
         prepared_data = {
             "id": board.get("id"),
             "summary": board.get("title"),
@@ -105,6 +108,7 @@ class BoardToProjectDumper(BaseDumper):
             "createdBy": created_by,
             "teamAccess": self._STANDARD_TEAM_ACCESS,
             "description": board.get("description"),
+            "permissions": permissions,
         }
         self._clean_and_save_data(prepared_data, dump_path)
 
@@ -138,7 +142,10 @@ class BoardToQueueDumper(BaseDumper):
         """Status key -> ``{"name": ..., "type": ...}``."""
         return self._collected_statuses
 
-    def dump(self, board: Dict[str, Any], dump_path: str, queue_key: str, lead: Optional[str]) -> Dict[Any, str]:
+    def dump(
+        self, board: Dict[str, Any], dump_path: str, queue_key: str, lead: Optional[str],
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[Any, str]:
         """Dumps the queue and returns the status key of every column and subcolumn by its id."""
         status_by_column_id: Dict[Any, str] = {}
         board_statuses: Dict[str, str] = {}
@@ -157,6 +164,7 @@ class BoardToQueueDumper(BaseDumper):
             "workflows": self._prepare_workflows_data(queue_key, board.get("title", "Unknown"), board_statuses),
             "issueTypesConfig": self._prepare_issue_types_config(queue_key),
             "local_fields": self._prepare_local_fields(),
+            "permissions": permissions,
         }
 
         self._clean_and_save_data(prepared_data, dump_path)
@@ -310,6 +318,89 @@ class BoardToQueueDumper(BaseDumper):
         if prop.get("type") == "checkbox":
             return {"type": "FixedListOptionsProvider", "values": ["Да", "Нет"]}
         return None
+
+
+# access level of a space role: comment, edit, administer; any other role reads
+ACCESS_LEVEL_BY_ROLE = {"reader": 1, "writer": 2, "root_writer": 2, "admin": 3}
+READ_LEVEL = 1
+# Tracker group of everyone in the organization: a space open to everyone gives its role to it
+EVERYONE_GROUP = "Все сотрудники"
+WRITE_LEVEL = 2
+ADMIN_LEVEL = 3
+
+
+def sees_related_cards_only(user: Dict[str, Any]) -> bool:
+    """A space member who sees only cards where they are the owner or a member."""
+    card_permissions = ((user.get("role_permissions") or {}).get("space") or {}).get("card") or {}
+    return user.get("access_mod") == "related_only" or bool(card_permissions.get("read_own") and not card_permissions.get("read"))
+
+
+def board_access(
+    spaces: List[Dict[str, Any]],
+    users_by_space: Dict[Any, List[Dict[str, Any]]],
+    role_names: Dict[str, str],
+    prepare_user: Callable[[Dict[str, Any]], Optional[str]],
+) -> Dict[Tuple[str, str], int]:
+    """The highest access level of every user and of everyone over the spaces of a board:
+    `{("users", login): level, ("groups", EVERYONE_GROUP): level}`. A user who sees only related cards reads the
+    project (`("project_readers", login)`) and, as an editor, creates issues (`("creators", login)`): their own
+    issues are reached by the queue permissions of author, assignee and followers, which a new queue has."""
+    access: Dict[Tuple[str, str], int] = {}
+
+    def grant(subject: Tuple[str, str], role_id: Any, max_level: int = ADMIN_LEVEL) -> None:
+        name = role_names.get(role_id)
+        level = min(ACCESS_LEVEL_BY_ROLE.get(name, READ_LEVEL), max_level)
+        if level > access.get(subject, 0):
+            access[subject] = level
+
+    for space in spaces:
+        if space.get("access") == "for_everyone" and space.get("for_everyone_access_role_id"):
+            grant(("groups", EVERYONE_GROUP), space["for_everyone_access_role_id"])
+        for user in users_by_space.get(space.get("id")) or []:
+            # a deactivated or deleted user has no access
+            if user.get("temporarily_inactive") or user.get("delete_requested_at"):
+                continue
+            role_ids = (user.get("role_ids") or []) + (user.get("groups_role_ids") or [])
+            login = prepare_user(user)
+            if sees_related_cards_only(user):
+                if login:
+                    for role_id in role_ids:
+                        grant(("project_readers", login), role_id, max_level=READ_LEVEL)
+                        grant(("creators", login), role_id, max_level=WRITE_LEVEL)
+                continue
+            if login:
+                for role_id in role_ids:
+                    grant(("users", login), role_id)
+    return access
+
+
+def _subjects(access: Dict[Tuple[str, str], int], level: int, kinds: Dict[str, str]) -> Dict[str, List[str]]:
+    """Subjects with at least the level; `kinds` maps a kind of `board_access` to a kind of permissions."""
+    subjects: Dict[str, List[str]] = {}
+    for (kind, name), subject_level in sorted(access.items()):
+        if subject_level >= level and kind in kinds and name not in subjects.get(kinds[kind], []):
+            subjects.setdefault(kinds[kind], []).append(name)
+    return subjects
+
+
+SUBJECTS = {"users": "users", "groups": "groups"}
+
+
+def queue_permissions(access: Dict[Tuple[str, str], int]) -> Dict[str, Dict[str, List[str]]]:
+    return {
+        "read": _subjects(access, READ_LEVEL, SUBJECTS),
+        "create": _subjects(access, WRITE_LEVEL, {**SUBJECTS, "creators": "users"}),
+        "write": _subjects(access, WRITE_LEVEL, SUBJECTS),
+        "grant": _subjects(access, ADMIN_LEVEL, SUBJECTS),
+    }
+
+
+def project_permissions(access: Dict[Tuple[str, str], int]) -> Dict[str, Any]:
+    return {"acl": {
+        "READ": _subjects(access, READ_LEVEL, {**SUBJECTS, "project_readers": "users"}),
+        "WRITE": _subjects(access, WRITE_LEVEL, SUBJECTS),
+        "GRANT": _subjects(access, ADMIN_LEVEL, SUBJECTS),
+    }}
 
 
 def stored_files(card: Dict[str, Any]) -> List[Dict[str, Any]]:

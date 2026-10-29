@@ -15,6 +15,9 @@ from .dumpers import (
     LANE_FIELD_NAME,
     RESOLUTION_KEY,
     RESOLUTION_NAME,
+    board_access,
+    project_permissions,
+    queue_permissions,
 )
 from .dump_results import (
     BoardDumpError,
@@ -125,15 +128,19 @@ class KaitenDumper:
                 board.get("owner") or self._fetcher.current_user
             )
 
+            access = self._board_access(board_id)
             queue_dump_path = os.path.join(self._data_path, "queues", queue_key)
             status_by_column_id = self._board_to_queue_dumper.dump(
-                board, queue_dump_path, queue_key=queue_key, lead=lead
+                board, queue_dump_path, queue_key=queue_key, lead=lead,
+                permissions=queue_permissions(access) if access else None,
             )
 
             # a title is not unique across spaces and may contain a path separator
             project_dir = re.sub(r"[\\/]", "_", f"{board.get('title') or 'board'}_{board_id}")
             project_dump_path = os.path.join(self._data_path, "projects", project_dir)
-            self._board_to_project_dumper.dump(board, project_dump_path, created_by=lead)
+            self._board_to_project_dumper.dump(
+                board, project_dump_path, created_by=lead, permissions=project_permissions(access) if access else None
+            )
 
             # Swimlanes only carry meaning when a board has more than one lane.
             lane_titles = [lane.get("title") for lane in board.get("lanes", []) if lane.get("title")]
@@ -160,6 +167,37 @@ class KaitenDumper:
             return BoardDumpSuccess(board_id, queue_key, card_results)
         except Exception as exc:
             return BoardDumpError(board_id, exc)
+
+    def _board_access(self, board_id: str) -> Optional[Dict[Tuple[str, str], int]]:
+        """Access to the board in Kaiten: members of its spaces and of their parent spaces. None when spaces,
+        members or roles are not loaded: the import revokes access of the group of everyone when it is not in the
+        permissions."""
+        if self._fetcher.spaces() is None:
+            return None
+        role_names = self._fetcher.space_role_names()
+        if not role_names:
+            return None
+        spaces = self._fetcher.board_spaces(board_id)
+        if not spaces:
+            logger.warning(f"Board {board_id}: no spaces of the board are loaded, access is not exported")
+            return None
+        space_uids = {space.get("uid") for space in spaces}
+        for space in spaces:
+            if space.get("parent_entity_uid") and space["parent_entity_uid"] not in space_uids:
+                logger.warning(
+                    f"Board {board_id}: parent {space['parent_entity_uid']} of space {space.get('id')} is not a space, "
+                    "access is not exported"
+                )
+                return None
+        users_by_space = {}
+        for space in spaces:
+            members = self._fetcher.space_users(space.get("id"))
+            if members is None:
+                logger.warning(f"Board {board_id}: members of space {space.get('id')} are not loaded, access is not exported")
+                return None
+            users_by_space[space.get("id")] = members
+        access = board_access(spaces, users_by_space, role_names, self._board_to_queue_dumper._prepare_user)
+        return access or None
 
     def _dump_board_cards(
         self,
