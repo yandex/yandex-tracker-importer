@@ -70,6 +70,8 @@ class BoardToProjectDumper(BaseDumper):
         prepared_data = {
             "id": data.get("id"),
             "summary": data.get("name"),
+            "createdAt": data.get("created"),
+            "createdBy": self._prepare_user(data.get("creator")),
             "teamAccess": self._STANDARD_TEAM_ACCESS,
             "description": data.get("desc"),
             "author": self._prepare_user(data.get("creator")),
@@ -251,7 +253,7 @@ class CardDumper(BaseDumper):
             "followers": data.get("members_full", []),
             "checklistItems": self._prepare_checklists(data.get("checklists", [])),
             "comments": self._prepare_comments(data.get("comments", [])),
-            "attachments": self._prepare_attachments(data.get("attachments", [])),
+            "attachments": self._prepare_attachments(data.get("attachments", []), create_info.get("memberCreator")),
             "project": {"primary": data.get("board_id")},
             **self._prepare_local_fields(data)
         }
@@ -353,19 +355,19 @@ class CardDumper(BaseDumper):
         processor = processors.get(field_type, lambda: field_item.get("value"))
         return processor()
 
-    def _prepare_attachments(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _prepare_attachments(
+        self, attachments: List[Dict[str, Any]], card_creator: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        # the import of an attachment requires its date and author: an unknown author is the card author
         result = []
         for attachment in attachments:
             if attachment.get("isUpload"):
-                att_data = {
+                result.append({
                     "filename": prepare_attachment_filename(attachment["name"], attachment["id"]),
-                    "name": attachment["name"]
-                }
-
-                if attachment.get("memberCreator"):
-                    att_data["createdAt"] = attachment.get("date")
-                    att_data["createdBy"] = self._prepare_user(attachment["memberCreator"])
-                result.append(att_data)
+                    "name": attachment["name"],
+                    "createdAt": attachment.get("date"),
+                    "createdBy": self._prepare_user(attachment.get("memberCreator") or card_creator),
+                })
         return result
 
     def _download_attachments(self, attachments: List[Dict[str, Any]], card_path: str) -> None:

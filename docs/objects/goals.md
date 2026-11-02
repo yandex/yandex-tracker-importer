@@ -14,6 +14,8 @@
 |---------------------------------------------|-----------------|---------------------------------------------------------------------------------------|
 | `summary`<span style="color: red;">*</span> | Строка          | Название                                                                              |
 | `id`<span style="color: red;">*</span>      | Строка          | Уникальный идентфикатор (можно указать абсолютно любую строку, главное - чтобы каждой сущности соответствовал один идентификатор) |
+| `createdAt`<span style="color: red;">*</span> | Строка          | Дата создания в формате `YYYY-MM-DDThh:mm:ss.sss±hhmm`                                |
+| `createdBy`<span style="color: red;">*</span> | Строка          | Логин пользователя, создавшего цель                                                   |
 | `teamAccess`                                | Логический      | Доступ команды                                                                        |
 | `description`                               | Строка          | Описание цели                                                                         |
 | `markupType`                                | Строка          | Тип отображаемой в тексте разметки                                                    |
@@ -34,6 +36,8 @@
 | `attachments`                               | Массив объектов | Вложения к сущности                                                                   |
 | `permissions`                               | Объект          | Права доступа и наследование доступа, формат — как у проектов ([projects.md](projects.md)) |
 | `keyResultItems`                            | Массив объектов | Ключевые результаты цели                                                              |
+
+Цель без `createdAt` или `createdBy` не создаётся, в журнале — `Error creating Goal`.
 
 ---
 
@@ -128,6 +132,8 @@
 
 ```yaml
 summary: Increase Sales by 20%
+createdAt: "2024-01-15T10:00:00.000+0300"
+createdBy: username
 id: goalId
 queues: SALES_QUEUE
 teamAccess: false
