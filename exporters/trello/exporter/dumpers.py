@@ -2,7 +2,7 @@ import os
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 from .trello_client import SimpleTrelloClient
@@ -227,6 +227,8 @@ class CardDumper(BaseDumper):
 
     def __init__(self, client: SimpleTrelloClient):
         self._client = client
+        # (issue key, file name, error) of attachments that are not downloaded
+        self.failed_files: List[Tuple[str, str, str]] = []
 
     @property
     def _filename(self) -> str:
@@ -385,5 +387,6 @@ class CardDumper(BaseDumper):
                         prepare_attachment_filename(attachment["name"], attachment["id"])
                     )
                     self._client.download_attachment(attachment["url"], file_path)
-                except Exception:
+                except Exception as exc:
                     logger.exception(f"Failed to download {attachment['name']}")
+                    self.failed_files.append((os.path.basename(card_path), attachment["name"], str(exc)))

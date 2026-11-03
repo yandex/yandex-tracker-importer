@@ -1,4 +1,5 @@
 import requests
+import os
 import platform
 import time
 from typing import Optional, Dict, Any
@@ -27,10 +28,15 @@ class SimpleTrelloClient:
         self.rate_limit_retry_after = rate_limit_retry_after
 
         self.session = requests.Session()
+        # credentials are sent in a header to keep them out of urls, error messages and the log
         self.session.headers.update({
             'Accept': 'application/json',
-            'User-Agent': f'SimpleTrelloClient/{platform.system()}'
+            'User-Agent': f'SimpleTrelloClient/{platform.system()}',
+            'Authorization': self._authorization(),
         })
+
+    def _authorization(self) -> str:
+        return f'OAuth oauth_consumer_key="{self.api_key}", oauth_token="{self.token}"'
 
     def _should_retry(self, status_code: int) -> bool:
         return status_code in [429, 502, 503, 504, 408]
@@ -111,8 +117,6 @@ class SimpleTrelloClient:
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         query_params = params or {}
-        query_params['key'] = self.api_key
-        query_params['token'] = self.token
 
         if endpoint.startswith('/'):
             endpoint = endpoint[1:]
@@ -133,15 +137,18 @@ class SimpleTrelloClient:
             raise Exception(f"Failed to decode JSON response: {str(e)}")
 
     def download_attachment(self, url, file_path):
-        headers = {
-            "Authorization": (
-                f'OAuth oauth_consumer_key="{self.api_key}",'
-                f'oauth_token="{self.token}"'
-            )
-        }
-        with requests.get(url, headers=headers, stream=True) as response:
-            response.raise_for_status()
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+        headers = {"Authorization": self._authorization()}
+        # the file appears in the dump only when downloaded in full
+        part_path = f"{file_path}.part"
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=60) as response:
+                response.raise_for_status()
+                with open(part_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            os.replace(part_path, file_path)
+        except Exception:
+            if os.path.exists(part_path):
+                os.remove(part_path)
+            raise

@@ -40,7 +40,8 @@ Trello API  →  trello exporter (этот проект)  →  data/*.yaml  → 
 Список досок пользователя:
 
 ```bash
-curl "https://api.trello.com/1/members/me/boards?fields=name&key=<API_KEY>&token=<TOKEN>"
+curl -H 'Authorization: OAuth oauth_consumer_key="<API_KEY>", oauth_token="<TOKEN>"' \
+  "https://api.trello.com/1/members/me/boards?fields=name"
 ```
 
 Каждая доска — `id` + `name`. Предложи пользователю строки `<board_id>:<QUEUE_KEY>`
@@ -74,6 +75,9 @@ docker run --rm -v "$(pwd)":/work -w /work trello-exporter:latest
 - `data/queues/<KEY>/queue.yaml` — очередь, статусы, воркфлоу, локальные поля;
 - `data/queues/<KEY>/<KEY>-N/issue.yaml` — задачи (рядом `attachments/`);
 - `data/{statuses,categories}.yaml` — общие справочники.
+
+Если экспорт завершился с кодом 1, разбери сводку ошибок в конце вывода и
+перезапусти экспорт после устранения причин.
 
 Открой пару `issue.yaml` и убедись, что `summary`/`status`/`tags`/`comments`
 выглядят осмысленно.

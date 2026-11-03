@@ -1,10 +1,12 @@
 import argparse
 import logging
 import os
+import sys
 from datetime import datetime
 from tqdm import tqdm
 
 from .config import get_config_content, get_generic_keys_mapping
+from .dump_results import build_summary
 from .trello_client import SimpleTrelloClient
 from .trello_dumper import TrelloDumper
 
@@ -57,8 +59,27 @@ def main() -> None:
     boards_mapper = get_generic_keys_mapping(project_path, "boards")
 
     dumper = TrelloDumper(source_trello_client, boards_mapper, data_path, max_workers=args.workers)
-    for result in tqdm(dumper.dump(), total=len(boards_mapper), desc="Boards"):
-        result.log()
+    results = []
+    stop_error = None
+    try:
+        for result in tqdm(dumper.dump(), total=len(boards_mapper), desc="Boards"):
+            result.log()
+            results.append(result)
+    except Exception as exc:
+        logger.exception("Export stopped")
+        stop_error = exc
+    summary = build_summary(results, dumper.failed_requests, dumper.failed_files)
+    if stop_error is not None:
+        summary.append(f"Export stopped: {stop_error}")
+    if summary:
+        message = "Export finished with errors:\n" + "\n".join(summary)
+        logger.error(message)
+    else:
+        message = "Export finished without errors"
+        logger.info(message)
+    print(message)
+    if summary:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,16 @@ logger = logging.getLogger(__name__)
 
 class TrelloDataFetcher:
     _TRELLO_BATCH_LIMIT = 10
+    # a page of actions holds 50 by default, 1000 at most
+    _ACTIONS_PAGE_LIMIT = 1000
 
     def __init__(self, client: SimpleTrelloClient, max_workers: Optional[int] = None):
         self._client = client
         self._max_workers = max_workers or os.cpu_count()
         self._user_cache = {}
         self._token_owner: Optional[Dict[str, Any]] = None
+        # requests that failed: their data is missing in the export
+        self.failed_requests: List[str] = []
 
     def fetch_board(self, board_id: str) -> Dict[str, Any]:
         try:
@@ -79,13 +83,14 @@ class TrelloDataFetcher:
             f"/cards/{card_id}/actions?filter=copyCard%2CconvertToCardFromCheckItem%2CemailCard&limit=1000",
             f"/cards/{card_id}/actions?filter=updateCard&limit=1",
             f"/cards/{card_id}/checklists",
-            f"/cards/{card_id}/actions?filter=commentCard",
+            f"/cards/{card_id}/actions?filter=commentCard&limit={self._ACTIONS_PAGE_LIMIT}",
             f"/cards/{card_id}/list",
             f"/cards/{card_id}/customFieldItems",
             f"/cards/{card_id}/attachments"
         ]
 
         create_info, copy_info, update_info, checklists, comments, card_list, custom_fields, attachments = self._execute_batch(urls)
+        comments = self._fetch_older_comments(card_id, comments or [])
 
         # assignees of checklist items and authors of attachments come as member ids
         member_ids = {
@@ -133,6 +138,25 @@ class TrelloDataFetcher:
 
         return card
 
+    def _fetch_older_comments(self, card_id: str, comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """All comments of a card: the first page and the older ones; actions come newest first."""
+        page = comments
+        while len(page) >= self._ACTIONS_PAGE_LIMIT:
+            endpoint = f"/cards/{card_id}/actions"
+            before = page[-1]["id"]
+            params = {"filter": "commentCard", "limit": self._ACTIONS_PAGE_LIMIT, "before": before}
+            try:
+                page = self._client.get(endpoint, params=params) or []
+            except Exception as exc:
+                logger.exception(f"Failed to fetch comments of card {card_id}")
+                self.failed_requests.append(f"{endpoint}?before={before}: {exc}")
+                break
+            if page and page[-1]["id"] == before:
+                self.failed_requests.append(f"{endpoint}?before={before}: the page did not move")
+                break
+            comments = comments + page
+        return comments
+
     def _fetch_members_batch(self, member_ids: List[str]) -> Dict[str, Dict]:
         members_map = {}
 
@@ -173,7 +197,7 @@ class TrelloDataFetcher:
             batch_param = ','.join(url for url in batch_urls)
 
             batch_response = self._client.get("/batch", params={"urls": batch_param})
-            for url, response in zip(urls, batch_response):
+            for url, response in zip(batch_urls, batch_response):
                 if "200" in response:
                     response_data = response["200"]
                     if not response_data:
@@ -182,11 +206,17 @@ class TrelloDataFetcher:
                         )
                     results.append(response_data)
                 else:
-                    error_status = response.get("statusCode", "UNKNOWN")
+                    # status: the statusCode field, otherwise a numeric key such as "404"
+                    error_status = str(response.get("statusCode") or next(
+                        (key for key in response if key.isdecimal()), "UNKNOWN"
+                    ))
                     logger.warning(
                         f"Request failed for URL: {url}. "
                         f"Server responded with: {error_status}"
                     )
+                    # a missing member stays missing on a rerun
+                    if error_status != "404" or not url.startswith("/members/"):
+                        self.failed_requests.append(f"{url}: {error_status}")
                     results.append(None)
 
         return results
@@ -194,8 +224,9 @@ class TrelloDataFetcher:
     def _get_board_custom_fields(self, board_id: str) -> Optional[List[Dict]]:
         try:
             return self._client.get(f"/boards/{board_id}/customFields")
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Failed to get custom fields for board {board_id}")
+            self.failed_requests.append(f"/boards/{board_id}/customFields: {exc}")
             return None
 
 

@@ -24,7 +24,6 @@
 | `teamUsers`                                 | Массив строк    | Участники (массив логинов)                                                            |
 | `clients`                                   | Массив строк    | Заказчики (массив логинов)                                                            |
 | `followers`                                 | Массив          | Наблюдатели (массив логинов)                                                          |
-| `start`                                     | Дата            | Дата начала в формате `YYYY-MM-DDThh:mm:ss.sss±hhmm`                                  |
 | `end`                                       | Дата            | Дедлайн в формате `YYYY-MM-DDThh:mm:ss.sss±hhmm`                                      |
 | `tags`                                      | Массив строк    | Теги                                                                                  |
 | `entityStatus`                              | Строка          | Статус: <br>`draft` - Новая; <br>`according_to_plan` - По плану; <br>`at_risk` - Есть риски; <br>`blocked` - Заблокирована;<br>`achieved` - Достигнута; <br>`partially_achieved` - Частично достигнута; <br>`not_achieved` - Не достигнута; <br>`exceeded` - Превышена; <br>`cancelled` - Отменена. |
@@ -150,7 +149,6 @@ clients:
   - marketing_client
 followers:
   - manager_login
-start: "2024-01-01T09:00:00.000+0300"
 end: "2024-03-31T18:00:00.000+0300"
 tags:
   - Q1

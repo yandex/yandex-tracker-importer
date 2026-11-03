@@ -1,7 +1,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from typing import Iterator, List, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .dumpers import BoardToProjectDumper, BoardToQueueDumper, CardDumper
 from .dump_results import (
@@ -29,6 +29,14 @@ class TrelloDumper:
         self._board_to_project_dumper = BoardToProjectDumper()
         self._card_dumper = CardDumper(client)
 
+    @property
+    def failed_requests(self) -> List[str]:
+        return self._fetcher.failed_requests
+
+    @property
+    def failed_files(self) -> List[Tuple[str, str, str]]:
+        return self._card_dumper.failed_files
+
     def dump(self) -> Iterator[BoardDumpResult]:
         for board_id, queue_key in self._boards_mapper.items():
             yield self._dump_board(board_id, queue_key)
@@ -52,13 +60,8 @@ class TrelloDumper:
             return BoardDumpError(board_id, exc)
 
     def _dump_board_cards(self, board_id: str, queue_path: str, queue_key: str) -> List[CardDumpResult]:
-        cards = sorted(
-            self._fetcher.fetch_cards_for_board(board_id),
-            key=lambda card_data: datetime.fromisoformat(
-                card_data.get("creation_info", {}).get("date")
-                or datetime.now().isoformat()
-            )
-        )
+        # issue numbers follow the creation of cards; a card with an unrecognized date goes last
+        cards = sorted(self._fetcher.fetch_cards_for_board(board_id), key=card_order)
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             card_dump_results = []
@@ -107,3 +110,17 @@ class TrelloDumper:
             ],
             dump_path
         )
+
+
+def card_order(card_data: Dict[str, Any]) -> Tuple[datetime, str]:
+    """Order of issue numbers: by creation, then by card id."""
+    return card_creation_moment(card_data), card_data.get("id") or ""
+
+
+def card_creation_moment(card_data: Dict[str, Any]) -> datetime:
+    date = (card_data.get("create_info") or {}).get("date")
+    try:
+        # Trello writes `...Z`, a date taken from an id is `...+0000`
+        return datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except (TypeError, ValueError):
+        return datetime.max.replace(tzinfo=timezone.utc)

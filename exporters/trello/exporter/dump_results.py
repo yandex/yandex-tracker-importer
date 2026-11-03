@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import List, Union
+from typing import Iterable, List, Tuple, Union
 from abc import ABC, abstractmethod
 
 
@@ -93,3 +93,20 @@ class BoardDumpError(DumpResult):
 
     def log(self) -> None:
         logger.error(f"Board {self.board_id} dump failed: {self.error}")
+
+
+def build_summary(
+    results: Iterable[BoardDumpResult], failed_requests: Iterable[str] = (), failed_files: Iterable[Tuple[str, str, str]] = ()
+) -> List[str]:
+    """Boards and cards that are not exported, requests whose data is missing and attachments that are not
+    downloaded, one per line."""
+    lines = []
+    for result in results:
+        if isinstance(result, BoardDumpError):
+            lines.append(f"Board {result.board_id}: {result.error}")
+        else:
+            for error in result.card_errors:
+                lines.append(f"Board {result.board_id}, card {error.card_id}: {error.error}")
+    lines += [f"Request {request}" for request in sorted(failed_requests)]
+    lines += [f"{issue_key}, file {name}: {error}" for issue_key, name, error in sorted(failed_files)]
+    return lines
