@@ -83,6 +83,16 @@ class EntityImporter(CachedImporter, ABC):
             self._cache_entity(input_data, entity_obj)
             return entity_obj
 
+        # родители проставляются только при создании, поэтому parentEntity проверяется до создания
+        try:
+            parents = self._prepare_parent_entity(input_data.get("parentEntity"))
+        except ValueError as error:
+            logger.error(
+                f"{self.object_name} {input_data.get('id')} is not created: parentEntity {error}: "
+                f"{input_data.get('parentEntity')}"
+            )
+            return None
+
         entity_obj = self._try_creating_object(input_data)
         if entity_obj is not None:
             summary = input_data["summary"]
@@ -114,24 +124,51 @@ class EntityImporter(CachedImporter, ABC):
                 self._metric_items[self._get_key(input_data)] = input_data["metricItems"]
 
             self._entity_links_collector.add_entity_links(self._get_key(input_data), input_data.get("links", []))
-            if input_data.get("parentEntity"):
-                self._parent_entities[self._get_key(input_data)] = {
-                    "primary": (
-                        str(input_data["parentEntity"]["primary"])
-                        if input_data.get("parentEntity") and input_data["parentEntity"].get("primary")
-                        else None
-                    ),
-                    "secondary": (
-                        [
-                            str(parent_id)
-                            for parent_id in input_data["parentEntity"]["secondary"]
-                        ]
-                        if input_data.get("parentEntity") and input_data["parentEntity"].get("secondary")
-                        else []
-                    ),
-                }
+            if parents is not None:
+                self._parent_entities[self._get_key(input_data)] = parents
 
         return entity_obj
+
+    @staticmethod
+    def _prepare_parent_entity(parent_entity: Any) -> Optional[Dict[str, Any]]:
+        """Родители сущности `{"primary": id | None, "secondary": [id, ...]}`; строка или число —
+        идентификатор основного родителя; без родителей — None. Неверное значение — ValueError."""
+        def is_id(value: Any) -> bool:
+            return isinstance(value, (str, int)) and not isinstance(value, bool) and value != ""
+
+        def is_empty(value: Any) -> bool:
+            # ложное значение — родителей нет; число 0 — идентификатор
+            return not value and not is_id(value)
+
+        if is_empty(parent_entity):
+            return None
+        if is_id(parent_entity):
+            return {"primary": str(parent_entity), "secondary": []}
+        if not isinstance(parent_entity, dict):
+            raise ValueError("has an unsupported format")
+        unknown_keys = set(parent_entity) - {"primary", "secondary"}
+        if unknown_keys:
+            raise ValueError(f"has unknown keys {sorted(map(str, unknown_keys))}")
+
+        primary = parent_entity.get("primary")
+        if is_empty(primary):
+            primary = None
+        if primary is not None and not is_id(primary):
+            raise ValueError("has an unsupported primary parent")
+        secondary = parent_entity.get("secondary")
+        if is_empty(secondary):
+            secondary = []
+        if isinstance(secondary, list):
+            secondary = [parent_id for parent_id in secondary if not is_empty(parent_id)]
+        if not isinstance(secondary, list) or not all(map(is_id, secondary)):
+            raise ValueError("has unsupported secondary parents")
+
+        if primary is None and not secondary:
+            return None
+        return {
+            "primary": str(primary) if primary is not None else None,
+            "secondary": [str(parent_id) for parent_id in secondary],
+        }
 
     def _prepare_data(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         return {
