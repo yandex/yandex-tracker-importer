@@ -75,6 +75,16 @@ class ProjectNotExistsError(BaseTrackerError):
         self.shortId = shortId
 
 
+class ObjectNotAccessibleError(BaseTrackerError):
+    """Объект существует, но закрыт для учётной записи импорта."""
+
+
+class IssueNotAccessibleError(ObjectNotAccessibleError):
+    def __init__(self, key: str):
+        super().__init__(f"Access to issue {key} is denied to the import account")
+        self.key = key
+
+
 class GoalNotExistsError(BaseTrackerError):
     object_name = "Goal"
 

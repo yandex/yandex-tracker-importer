@@ -9,7 +9,7 @@ from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.objects import Resource
 from yandex_tracker_client.exceptions import NotFound
 
-from ..exceptions import ObjectNotCreatedError
+from ..exceptions import ObjectNotAccessibleError, ObjectNotCreatedError
 from ..mapper import EntityMapper
 from ..utils import load_yaml_file
 
@@ -43,6 +43,8 @@ class GetOrCreateImporter(ABC):
         except NotFound:
             logger.info(f"The {self.object_name} with data {input_data} was not found, trying to create")
             return None, True
+        except ObjectNotAccessibleError:
+            raise
         except Exception:
             logger.exception(f"Error searching {self.object_name} with data: {input_data}")
             return None, False

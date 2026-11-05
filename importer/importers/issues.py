@@ -14,7 +14,7 @@ from .fields import GlobalFieldImporter, LocalFieldImporter
 from .queue_objects import ComponentImporter, VersionImporter
 from ..constants import DEFAULT_TRACKER_UI_URL, NON_IMPORTABLE_ISSUE_FIELDS
 from ..link_collectors import IssueLinksCollector
-from ..exceptions import LocalFieldNotExistsError
+from ..exceptions import IssueNotAccessibleError, LocalFieldNotExistsError
 from ..mapper import EntityMapper
 from ..text_normalizer import TextNormalizer
 from ..tracker_collections import create_checklist_item
@@ -67,6 +67,8 @@ class IssueImporter(GetOrCreateImporter):
         return "Issue"
 
     def get_or_create(self, input_data: Dict[str, Any], attachments_path: str) -> Tuple[Optional[Resource], bool]:
+        """Задача, которая существует и закрыта для учётной записи импорта, например правами
+        компонента, — IssueNotAccessibleError."""
         issue_obj = self._try_getting_object(input_data)
         if issue_obj is not None:
             # у существующей задачи собираются связи с задачами, с которыми она ещё не связана
@@ -231,7 +233,12 @@ class IssueImporter(GetOrCreateImporter):
         return mapped
 
     def _get_object(self, data: Dict[str, Any]) -> Optional[Resource]:
-        return self._retry_forbidden(lambda: self._client.issues.get(self._mapper.get_issue_key(data['key'])))
+        key = self._mapper.get_issue_key(data['key'])
+        try:
+            return self._retry_forbidden(lambda: self._client.issues.get(key))
+        except Forbidden:
+            # несуществующая задача — 404 и в закрытой очереди: отказ в доступе значит, что задача есть
+            raise IssueNotAccessibleError(key)
 
     def _create_object(self, prepared_data: Dict[str, Any]) -> Resource:
         try:

@@ -119,6 +119,17 @@ def update_template_permissions(collection: Any, path: str, template_id: Any, ve
     )
 
 
+def update_component_permissions(client: TrackerClient, component_id: Any, version: Any, data: Dict[str, Any]):
+    """Права компонента меняются с номером их версии из `GET /components/{id}/permissions`."""
+    components = client.components
+    return components._execute_request(
+        components._connection.patch,
+        path=f"/{{api_version}}/components/{component_id}/permissions",
+        params={"version": version},
+        data=data,
+    )
+
+
 def create_checklist_item(checklist_items: Collection, data: Dict[str, Any]):
     """Создаёт пункт чеклиста задачи или сущности со всеми полями `prepare_checklist_item_data`:
     `create` клиента не принимает ключ `checklistItemType`, а для сущностей — и `url`."""

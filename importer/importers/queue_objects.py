@@ -20,7 +20,12 @@ from ..exceptions import (
 )
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
-from ..tracker_collections import get_user_queue_permissions, run_version_action, update_workflow
+from ..tracker_collections import (
+    get_user_queue_permissions,
+    run_version_action,
+    update_component_permissions,
+    update_workflow,
+)
 from ..utils import clean_empty, get_optional, prepare_field_value
 
 
@@ -462,6 +467,10 @@ class QueueImporter(GetOrCreateImporter):
         self._lifted_deny = {}
         # очереди, где отказ в доступе не прошёл за все повторы
         self._forbidden_persists = set()
+        # права компонентов: (ключ очереди, компонент, права из выгрузки), ставятся в конце импорта
+        self._pending_component_permissions = []
+        # очереди, задачи которых импорт прошёл: число задач, которые не импортировались
+        self._issues_imported = {}
         self._myself = None
 
     @property
@@ -487,6 +496,7 @@ class QueueImporter(GetOrCreateImporter):
             "description": input_data.get("description"),
             "assignAuto": input_data.get("assignAuto"),
             "denyVoting": input_data.get("denyVoting"),
+            "useComponentPermissionsIntersection": input_data.get("useComponentPermissionsIntersection"),
         })
 
     def _prepare_issue_types_config_data(self, issue_types_config: List[Dict[str, Any]], queue_key: str) -> List[Dict[str, Any]]:
@@ -715,6 +725,105 @@ class QueueImporter(GetOrCreateImporter):
         self._pending_deny = {}
         self._lifted_deny = {}
 
+    def update_component_permissions_intersection(self, queue_obj: Resource, queue_data: Dict[str, Any]) -> None:
+        """Включает у очереди пересечение прав компонентов, если оно включено в выгрузке. Не выключает:
+        выключение расширяет доступ к задачам."""
+        if not queue_data.get("useComponentPermissionsIntersection"):
+            return
+        if queue_obj.as_dict().get("useComponentPermissionsIntersection"):
+            return
+        try:
+            self._client.queues[queue_obj.key].update(useComponentPermissionsIntersection=True)
+        except Exception:
+            logger.exception(
+                f"Error enabling intersection of component permissions for queue {queue_obj.key}, enable it manually"
+            )
+
+    def add_component_permissions(self, queue_key: str, component: Resource, permissions: Dict[str, Any]) -> None:
+        """Запоминает права компонента; `update_component_permissions` ставит их в конце импорта: они могут
+        закрыть учётной записи импорта чтение задач и постановку компонента на задачи."""
+        if clean_empty(permissions):
+            self._pending_component_permissions.append((queue_key, component, permissions))
+
+    def issues_imported(self, queue_key: str, failed: int = 0) -> None:
+        self._issues_imported[queue_key] = failed
+
+    def update_component_permissions(self) -> None:
+        """Добавляет права компонентов из выгрузки к существующим у очередей, задачи которых импорт прошёл.
+        Роли и группы ставятся отдельным запросом до пользователей: пользователь, которого нет в целевой
+        организации, не мешает ограничить доступ к задачам компонента."""
+        # очереди с неудачными задачами, у компонентов которых есть права
+        restricted_queues = set()
+        for queue_key, component, permissions in self._pending_component_permissions:
+            if queue_key not in self._issues_imported:
+                logger.warning(
+                    f"Permissions of component {component.name} of queue {queue_key} are not set: the issues of the "
+                    "queue were not imported, the next run sets them"
+                )
+                continue
+            applied = False
+            failed = False
+            # компонент с правами любого вида закрывает свои задачи от прав очереди
+            had_permissions = None
+            try:
+                current = self._client.components[component.id].permissions.as_dict()
+                had_permissions = any(current.get(kind) for kind in ("create", "read", "write", "writeNoAssign"))
+                changes = clean_empty({
+                    permission_type: self._prepare_permission_changes(
+                        permissions.get(permission_type) or {}, queue_key, f"{permission_type} of component {component.name}"
+                    )
+                    for permission_type in ("create", "read", "write", "writeNoAssign")
+                })
+            except Exception:
+                logger.exception(f"Error preparing permissions for component {component.name} of queue {queue_key}: {permissions}")
+                changes, failed = {}, True
+            for kinds in (("roles", "groups"), ("users",)):
+                stage = clean_empty({
+                    permission_type: {kind: subjects[kind] for kind in kinds if kind in subjects}
+                    for permission_type, subjects in changes.items()
+                })
+                if not stage:
+                    continue
+                try:
+                    version = self._client.components[component.id].permissions.version
+                    update_component_permissions(self._client, component.id, version, stage)
+                    applied = True
+                except Exception:
+                    failed = True
+                    logger.exception(
+                        f"Error updating permissions for component {component.name} of queue {queue_key} with data: "
+                        f"{stage}, set them manually"
+                    )
+            if applied or had_permissions:
+                restricted_queues.add(queue_key)
+            if applied:
+                if not failed:
+                    logger.info(f"Successfully updated permissions for component {component.name} of queue {queue_key}")
+            elif not had_permissions:
+                # своих прав нет или их не удалось прочитать
+                self._report_open_component(component, queue_key)
+            else:
+                logger.error(
+                    f"Permissions of component {component.name} of queue {queue_key} from the dump are not set; the "
+                    "issues of the component are available by its current permissions"
+                )
+        for queue_key in sorted(restricted_queues):
+            if self._issues_imported[queue_key]:
+                # права ставятся и при неудачных задачах: перенесённые задачи компонентов закрываются сразу
+                logger.warning(
+                    f"Issues of queue {queue_key} not imported: {self._issues_imported[queue_key]}; a re-run creates those "
+                    "of them with a component that has permissions if the import account owns the queue or is in "
+                    "create, read and write of the component"
+                )
+        self._pending_component_permissions = []
+
+    @staticmethod
+    def _report_open_component(component: Resource, queue_key: str) -> None:
+        logger.error(
+            f"Permissions of component {component.name} of queue {queue_key} are not set; issues of the component are "
+            "available by the queue permissions, set them manually"
+        )
+
     def _prepare_permission_changes(self, permission: Dict[str, Any], queue_key: str, permission_type: str) -> Dict[str, Any]:
         return {
             "users": {"add": list({self._mapper.get_user(user) for user in permission.get("users", [])})},
@@ -733,6 +842,10 @@ class ComponentImporter(CachedImporter):
     @property
     def object_name(self) -> str:
         return "Component"
+
+    @property
+    def queue_key(self) -> str:
+        return self._queue_obj.key
 
     def get_component_by_name(self, name: str) -> Resource:
         component_obj = self.get_from_cache(f"{self._queue_obj.key}-{name}")

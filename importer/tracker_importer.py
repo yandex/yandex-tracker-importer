@@ -44,6 +44,7 @@ from .importers.entities import (
 )
 from .importers.issues import IssueImporter, linked_issue_keys
 from .exceptions import (
+    IssueNotAccessibleError,
     WorkflowNotCreatedError,
     LocalFieldNotCreatedError,
     ComponentNotCreatedError,
@@ -130,8 +131,11 @@ class TrackerImporter:
         try:
             self._import_all()
         finally:
-            # запрет доступа ставится последним и при любом исходе прогона
-            self._queue_importer.update_deny_permissions()
+            # права компонентов и запрет доступа ставятся последними и при любом исходе прогона
+            try:
+                self._queue_importer.update_component_permissions()
+            finally:
+                self._queue_importer.update_deny_permissions()
 
         return self._progress_tracker
 
@@ -165,8 +169,9 @@ class TrackerImporter:
         for importer, automations in self._queued_automations:
             for automation_data in automations:
                 importer.get_or_create(automation_data)
-        for queue_dir, issues_importer in self._queued_issues:
-            self._import_issues_with_threads(queue_dir, issues_importer)
+        for queue_key, queue_dir, issues_importer in self._queued_issues:
+            failed = self._import_issues_with_threads(queue_dir, issues_importer)
+            self._queue_importer.issues_imported(queue_key, failed)
 
     def _update_entities_metrics(self) -> None:
         """Метрики проставляются после дашбордов: до их импорта адрес виджета ещё неизвестен."""
@@ -269,6 +274,7 @@ class TrackerImporter:
             if queue_obj is not None:
                 # права — сразу: сбой дальше не должен оставить очередь с доступом по умолчанию
                 self._queue_importer.update_permissions(queue_obj, queue_data)
+                self._queue_importer.update_component_permissions_intersection(queue_obj, queue_data)
                 self._lift_deny(queue_obj, queue_data, queue_dir)
 
                 # локальные поля, компоненты и версии — до воркфлоу: на них ссылаются условия, экраны
@@ -362,7 +368,7 @@ class TrackerImporter:
                     retry_forbidden=functools.partial(self._queue_importer.retry_forbidden, queue_obj.key),
                 )
                 # задачи — после досок и спринтов всех очередей
-                self._queued_issues.append((queue_dir, issues_importer))
+                self._queued_issues.append((queue_obj.key, queue_dir, issues_importer))
 
     def _import_statuses(self, queue_data: Dict[str, Any]) -> None:
         for workflow in get_required_field(queue_data, "workflows"):
@@ -407,6 +413,9 @@ class TrackerImporter:
                     self._mapper.get_queue(queue_data["key"]),
                     component_data
                 )
+            self._queue_importer.add_component_permissions(
+                component_importer.queue_key, component, component_data.get("permissions")
+            )
 
     def _lift_deny(self, queue_obj: Resource, queue_data: Dict[str, Any], queue_dir: str) -> None:
         """Снимает запрет прошлого прогона до импорта версий и задач очереди."""
@@ -432,7 +441,8 @@ class TrackerImporter:
             except Exception:
                 logger.exception(f"Error updating version {version_data} of queue {queue_data.get('key')}")
 
-    def _import_issues_with_threads(self, queue_data_path: str, issue_importer: IssueImporter) -> None:
+    def _import_issues_with_threads(self, queue_data_path: str, issue_importer: IssueImporter) -> int:
+        """Импортирует задачи очереди; возвращает число задач, которые не импортировались."""
         issue_dirs = [
             os.path.join(queue_data_path, dirname)
             for dirname in os.listdir(queue_data_path)
@@ -444,15 +454,24 @@ class TrackerImporter:
                 future = executor.submit(self._import_issue, issue_dir, issue_importer)
                 futures.append(future)
 
+            failed = 0
             for future in futures:
-                self._progress_tracker.report_issue(bool(future.result()))
+                imported = bool(future.result())
+                failed += not imported
+                self._progress_tracker.report_issue(imported)
+        return failed
 
     def _import_issue(self, issue_data_path: str, issue_importer: IssueImporter) -> None:
         issue_file_path = os.path.join(issue_data_path, "issue.yaml")
         issue_data = load_yaml_file(issue_file_path)
 
         attachments_path = os.path.join(issue_data_path, "attachments")
-        issue_obj = issue_importer.get_or_create(issue_data, attachments_path)
+        try:
+            issue_obj = issue_importer.get_or_create(issue_data, attachments_path)
+        except IssueNotAccessibleError as error:
+            # задача существует и закрыта для учётной записи импорта
+            logger.warning(f"{error}, it is skipped")
+            return True
         return issue_obj
 
     def _import_issue_links_with_threads(self) -> None:
