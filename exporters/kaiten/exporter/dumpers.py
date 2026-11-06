@@ -90,29 +90,6 @@ class BaseDumper(ABC):
             return data
 
 
-class BoardToProjectDumper(BaseDumper):
-    _STANDARD_TEAM_ACCESS = True
-
-    @property
-    def _filename(self) -> str:
-        return "project.yaml"
-
-    def dump(
-        self, board: Dict[str, Any], dump_path: str, created_by: Optional[str] = None,
-        permissions: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        prepared_data = {
-            "id": board.get("id"),
-            "summary": board.get("title"),
-            "createdAt": to_tracker_datetime(board.get("created")),
-            "createdBy": created_by,
-            "teamAccess": self._STANDARD_TEAM_ACCESS,
-            "description": board.get("description"),
-            "permissions": permissions,
-        }
-        self._clean_and_save_data(prepared_data, dump_path)
-
-
 class BoardToQueueDumper(BaseDumper):
 
     _STANDARD_DEFAULT_TYPE = "task"
@@ -342,9 +319,10 @@ def board_access(
     prepare_user: Callable[[Dict[str, Any]], Optional[str]],
 ) -> Dict[Tuple[str, str], int]:
     """The highest access level of every user and of everyone over the spaces of a board:
-    `{("users", login): level, ("groups", EVERYONE_GROUP): level}`. A user who sees only related cards reads the
-    project (`("project_readers", login)`) and, as an editor, creates issues (`("creators", login)`): their own
-    issues are reached by the queue permissions of author, assignee and followers, which a new queue has."""
+    `{("users", login): level, ("groups", EVERYONE_GROUP): level}`. A user who sees only related cards is
+    `("creators", login)`: an editor creates issues, and any such user keeps the queue permissions non-empty, so the
+    queue is closed. Their own issues are reached by the queue permissions of author, assignee and followers, which a
+    new queue has."""
     access: Dict[Tuple[str, str], int] = {}
 
     def grant(subject: Tuple[str, str], role_id: Any, max_level: int = ADMIN_LEVEL) -> None:
@@ -365,7 +343,6 @@ def board_access(
             if sees_related_cards_only(user):
                 if login:
                     for role_id in role_ids:
-                        grant(("project_readers", login), role_id, max_level=READ_LEVEL)
                         grant(("creators", login), role_id, max_level=WRITE_LEVEL)
                 continue
             if login:
@@ -393,14 +370,6 @@ def queue_permissions(access: Dict[Tuple[str, str], int]) -> Dict[str, Dict[str,
         "write": _subjects(access, WRITE_LEVEL, SUBJECTS),
         "grant": _subjects(access, ADMIN_LEVEL, SUBJECTS),
     }
-
-
-def project_permissions(access: Dict[Tuple[str, str], int]) -> Dict[str, Any]:
-    return {"acl": {
-        "READ": _subjects(access, READ_LEVEL, {**SUBJECTS, "project_readers": "users"}),
-        "WRITE": _subjects(access, WRITE_LEVEL, SUBJECTS),
-        "GRANT": _subjects(access, ADMIN_LEVEL, SUBJECTS),
-    }}
 
 
 def stored_files(card: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -700,7 +669,6 @@ class CardDumper(BaseDumper):
             "worklogs": self._prepare_worklogs(card.get("time_logs", [])),
             "storyPoints": card.get("size"),
             "links": self._prepare_links(card, key_by_card_id or {}, created_at_by_card_id, created_by),
-            "project": {"primary": card.get("board_id")},
             "boards": [str(card["board_id"])] if card.get("board_id") is not None and not is_archived(card) else [],
             "sprint": [sprint] if sprint else [],
             **self._prepare_local_fields(card),

@@ -1,13 +1,11 @@
 import logging
 import os
-import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .dumpers import (
     BoardDumper,
-    BoardToProjectDumper,
     BoardToQueueDumper,
     CardDumper,
     CATEGORY_NAME,
@@ -16,7 +14,6 @@ from .dumpers import (
     RESOLUTION_KEY,
     RESOLUTION_NAME,
     board_access,
-    project_permissions,
     queue_permissions,
 )
 from .dump_results import (
@@ -47,7 +44,6 @@ class KaitenDumper:
         self._custom_properties = self._fetcher.fetch_custom_properties()
 
         self._board_to_queue_dumper = BoardToQueueDumper(self._card_types, self._custom_properties)
-        self._board_to_project_dumper = BoardToProjectDumper()
         self._card_dumper = CardDumper(client, self._fetcher, self._custom_properties, self._card_types)
         self._board_dumper = BoardDumper()
         self._boards: List[Dict[str, Any]] = []
@@ -133,13 +129,6 @@ class KaitenDumper:
             status_by_column_id = self._board_to_queue_dumper.dump(
                 board, queue_dump_path, queue_key=queue_key, lead=lead,
                 permissions=queue_permissions(access) if access else None,
-            )
-
-            # a title is not unique across spaces and may contain a path separator
-            project_dir = re.sub(r"[\\/]", "_", f"{board.get('title') or 'board'}_{board_id}")
-            project_dump_path = os.path.join(self._data_path, "projects", project_dir)
-            self._board_to_project_dumper.dump(
-                board, project_dump_path, created_by=lead, permissions=project_permissions(access) if access else None
             )
 
             # Swimlanes only carry meaning when a board has more than one lane.
