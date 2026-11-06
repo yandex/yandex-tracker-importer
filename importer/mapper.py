@@ -12,7 +12,6 @@ class EntityMapper:
         self._issue_types_map = get_generic_keys_mapping(project_path, "issue_types")
         self._priorities_map = get_generic_keys_mapping(project_path, "priorities", validate_file_exist=False)
         self._fields_map = get_generic_keys_mapping(project_path, "fields", validate_file_exist=False)
-        self._local_fields_map = get_generic_keys_mapping(project_path, "local_fields", validate_file_exist=False)
         self._groups_map = get_generic_keys_mapping(project_path, "groups", validate_file_exist=False)
 
     def _get_mapping_value(self, mapping: Dict[str, str], key: Optional[str]) -> Optional[str]:

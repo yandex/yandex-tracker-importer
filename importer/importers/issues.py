@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -25,7 +26,6 @@ from ..utils import (
     prepare_checklist_item_data,
     map_custom_user_field_value,
     clean_empty,
-    retry
 )
 
 
@@ -86,15 +86,17 @@ class IssueImporter(GetOrCreateImporter):
             self._issue_links_collector.add_issue_links(issue_obj, missing_links)
             return issue_obj
 
-        attachments_data = input_data.pop("attachments", [])
-        checklist_data = input_data.pop("checklistItems", [])
-        worklogs_data = input_data.pop("worklogs", [])
-        comments_data = input_data.pop("comments", [])
-        links = input_data.pop("links", [])
+        attachments_data = input_data.pop("attachments", None) or []
+        checklist_data = input_data.pop("checklistItems", None) or []
+        worklogs_data = input_data.pop("worklogs", None) or []
+        comments_data = input_data.pop("comments", None) or []
+        links = input_data.pop("links", None) or []
         self._add_worklogs_spent(input_data, worklogs_data)
 
         issue_obj = self._try_creating_object(input_data)
-        if issue_obj is not None:
+        if issue_obj is None:
+            return None
+        try:
             created_attachments = self._create_attachments(attachments_data, issue_obj, attachments_path)
             text_normalizer = TextNormalizer(
                 self._mapper,
@@ -107,6 +109,9 @@ class IssueImporter(GetOrCreateImporter):
             self._create_worklogs(worklogs_data, issue_obj)
             self._create_comments(comments_data, issue_obj, text_normalizer)
             self._issue_links_collector.add_issue_links(issue_obj, links)
+        except Exception:
+            # задача создана: повторный импорт её найдёт и добавит только недостающие связи
+            logger.exception(f"Error completing issue {issue_obj.key}, it is created partially")
 
         return issue_obj
 
@@ -139,10 +144,10 @@ class IssueImporter(GetOrCreateImporter):
             "updatedBy": self._mapper.get_user(input_data.get("updatedBy")),
             "resolvedBy": self._mapper.get_user(input_data.get("resolvedBy")),
             "assignee": self._mapper.get_user(input_data.get("assignee")),
-            "followers": [self._mapper.get_user(u) for u in input_data.get("followers", [])],
-            "access": [self._mapper.get_user(u) for u in input_data.get("access", [])],
-            "votedBy": [self._mapper.get_user(u) for u in input_data.get("votedBy", [])],
-            "favoritedBy": [self._mapper.get_user(u) for u in input_data.get("favoritedBy", [])],
+            "followers": [self._mapper.get_user(u) for u in input_data.get("followers") or []],
+            "access": [self._mapper.get_user(u) for u in input_data.get("access") or []],
+            "votedBy": [self._mapper.get_user(u) for u in input_data.get("votedBy") or []],
+            "favoritedBy": [self._mapper.get_user(u) for u in input_data.get("favoritedBy") or []],
             "status": self._mapper.get_status(input_data.get("status")),
             "resolution": self._mapper.get_resolution(input_data.get("resolution")),
             "type": self._mapper.get_issue_type(input_data.get("type")),
@@ -150,15 +155,15 @@ class IssueImporter(GetOrCreateImporter):
             "description": input_data.get("description"),
             "affectedVersions": [
                 self._version_importer.get_version_by_name(version_name).id
-                for version_name in input_data.get("affectedVersions", [])
+                for version_name in input_data.get("affectedVersions") or []
             ],
             "fixVersions": [
                 self._version_importer.get_version_by_name(version_name).id
-                for version_name in input_data.get("fixVersions", [])
+                for version_name in input_data.get("fixVersions") or []
             ],
             "components": [
                 self._component_importer.get_component_by_name(component_name).id
-                for component_name in input_data.get("components", [])
+                for component_name in input_data.get("components") or []
             ],
             "project": {
                 "primary": (
@@ -254,6 +259,7 @@ class IssueImporter(GetOrCreateImporter):
         queue_key = self._mapper.get_queue(data["key"].split("-")[0])
 
         local_fields_prepared_data = {}
+        source_keys = {}
         for key, value in data.items():
             if key.startswith("local_"):
                 try:
@@ -265,13 +271,49 @@ class IssueImporter(GetOrCreateImporter):
                     )
                     continue
 
-                local_fields_prepared_data[local_field_obj.id] = map_custom_user_field_value(local_field_obj, value, self._mapper)
+                try:
+                    local_fields_prepared_data[local_field_obj.id] = map_custom_user_field_value(
+                        local_field_obj, value, self._mapper
+                    )
+                    source_keys[local_field_obj.id] = key
+                except Exception:
+                    logger.exception(f"Error preparing local field '{key}' of issue {issue_obj.key} with value: {value}")
 
-        @retry(max_attempts=5, delay=2, backoff=2, exceptions=BadRequest)
-        def update_issue(issue_obj: Resource, local_fields_prepared_data: Dict[str, Any]) -> Resource:
-            return self._client.issues[issue_obj.key].update(**local_fields_prepared_data)
+        if not local_fields_prepared_data:
+            return issue_obj
+        try:
+            return self._update_local_fields(issue_obj, local_fields_prepared_data)
+        except Exception:
+            if len(local_fields_prepared_data) == 1:
+                field_id, value = next(iter(local_fields_prepared_data.items()))
+                logger.exception(f"Error setting local field '{source_keys[field_id]}' of issue {issue_obj.key} with value: {value}")
+                return issue_obj
+        # набор отклонён целиком: поля пишутся по одному, чтобы одно неверное значение не лишило задачу остальных
+        for field_id, value in local_fields_prepared_data.items():
+            try:
+                issue_obj = self._client.issues[issue_obj.key].update(**{field_id: value})
+            except Exception:
+                logger.exception(f"Error setting local field '{source_keys[field_id]}' of issue {issue_obj.key} with value: {value}")
+        return issue_obj
 
-        return update_issue(issue_obj, local_fields_prepared_data)
+    def _update_local_fields(self, issue_obj: Resource, prepared_data: Dict[str, Any]) -> Resource:
+        """Локальные поля только что созданной очереди API принимает в задаче не сразу: первые запросы
+        получают 400 «… there are no local fields in the queue» («… в очереди не существует локальных
+        полей»). Другие ошибки, в том числе неверное значение поля, не повторяются."""
+        delay = 2
+        for attempt in range(1, 6):
+            try:
+                return self._client.issues[issue_obj.key].update(**prepared_data)
+            except BadRequest as error:
+                if not self._is_local_fields_delay(error) or attempt == 5:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+
+    @staticmethod
+    def _is_local_fields_delay(error: BadRequest) -> bool:
+        text = f"{getattr(error, 'error_messages', '')} {getattr(error, 'errors', '')}".lower()
+        return "no local fields" in text or "не существует локальных полей" in text
 
     def _create_attachments(
         self,

@@ -461,18 +461,27 @@ class TrackerImporter:
                 self._progress_tracker.report_issue(imported)
         return failed
 
-    def _import_issue(self, issue_data_path: str, issue_importer: IssueImporter) -> None:
+    def _import_issue(self, issue_data_path: str, issue_importer: IssueImporter) -> Any:
+        """Созданная или найденная задача; True — задача существует и закрыта для учётной записи
+        импорта; None — задача не импортирована. Сбой одной задачи не останавливает импорт остальных."""
         issue_file_path = os.path.join(issue_data_path, "issue.yaml")
-        issue_data = load_yaml_file(issue_file_path)
-
+        if not os.path.isfile(issue_file_path):
+            logger.error(f"Directory {issue_data_path} has no issue.yaml, it is skipped")
+            return None
         attachments_path = os.path.join(issue_data_path, "attachments")
         try:
-            issue_obj = issue_importer.get_or_create(issue_data, attachments_path)
+            issue_data = load_yaml_file(issue_file_path)
+            if not isinstance(issue_data, dict):
+                logger.error(f"File {issue_file_path} is empty or is not a mapping, the issue is skipped")
+                return None
+            return issue_importer.get_or_create(issue_data, attachments_path)
         except IssueNotAccessibleError as error:
             # задача существует и закрыта для учётной записи импорта
             logger.warning(f"{error}, it is skipped")
             return True
-        return issue_obj
+        except Exception:
+            logger.exception(f"Error importing issue from {issue_data_path}, it is skipped")
+            return None
 
     def _import_issue_links_with_threads(self) -> None:
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
