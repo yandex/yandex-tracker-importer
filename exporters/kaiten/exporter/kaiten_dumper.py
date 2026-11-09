@@ -8,7 +8,7 @@ from .dumpers import (
     BoardDumper,
     BoardToQueueDumper,
     CardDumper,
-    CATEGORY_NAME,
+    FIELD_CATEGORY,
     LANE_FIELD_KEY,
     LANE_FIELD_NAME,
     RESOLUTION_KEY,
@@ -93,7 +93,6 @@ class KaitenDumper:
         self._dump_resolutions()
         self._dump_issue_types()
         self._dump_global_fields()
-        self._dump_category()
 
     @staticmethod
     def _number_cards(queue_key: str, cards: List[Dict[str, Any]]) -> Dict[Any, str]:
@@ -275,7 +274,7 @@ class KaitenDumper:
             {
                 "key": LANE_FIELD_KEY,
                 "name": LANE_FIELD_NAME,
-                "category": CATEGORY_NAME["ru"],
+                "category": FIELD_CATEGORY,
                 "schema": {"type": "string"},
                 "optionsProvider": {
                     "type": "FixedListOptionsProvider",
@@ -287,11 +286,3 @@ class KaitenDumper:
 
     def _dump_resolutions(self) -> None:
         dump_to_yaml([{"key": RESOLUTION_KEY, "name": RESOLUTION_NAME}], os.path.join(self._data_path, "resolutions.yaml"))
-
-    def _dump_category(self) -> None:
-        STANDARD_ORDER_CATEGORY = 1
-        dump_path = os.path.join(self._data_path, "categories.yaml")
-        dump_to_yaml(
-            [{"name": CATEGORY_NAME, "order": STANDARD_ORDER_CATEGORY}],
-            dump_path,
-        )

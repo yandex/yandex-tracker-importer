@@ -137,7 +137,7 @@ data/
 ├── statuses.yaml
 ├── resolutions.yaml
 ├── issue_types.yaml
-└── categories.yaml
+└── global_fields.yaml   ← поле дорожки, если на доске больше одной дорожки
 ```
 
 ## Особенности работы

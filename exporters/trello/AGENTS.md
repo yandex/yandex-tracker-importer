@@ -74,7 +74,7 @@ docker run --rm -v "$(pwd)":/work -w /work trello-exporter:latest
 
 - `data/queues/<KEY>/queue.yaml` — очередь, статусы, воркфлоу, локальные поля;
 - `data/queues/<KEY>/<KEY>-N/issue.yaml` — задачи (рядом `attachments/`);
-- `data/{statuses,categories}.yaml` — общие справочники.
+- `data/statuses.yaml` — статусы.
 
 Если экспорт завершился с кодом 1, разбери сводку ошибок в конце вывода и
 перезапусти экспорт после устранения причин.

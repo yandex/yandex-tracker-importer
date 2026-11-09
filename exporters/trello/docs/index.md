@@ -85,8 +85,7 @@ data/
 │           └── attachments/
 │               ├── file_123.pdf
 │               └── image_321.png
-├── statuses.yaml
-└── categories.yaml
+└── statuses.yaml
 ```
 
 ## Требования

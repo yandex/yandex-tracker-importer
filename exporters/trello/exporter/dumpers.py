@@ -63,7 +63,8 @@ class BoardToQueueDumper(BaseDumper):
 
     _STANDARD_DEFAULT_TYPE = "task"
     _STANDARD_DEFAULT_PRIORITY = "normal"
-    _STANDARD_CATEGORY_FIELD = "Из Trello"
+    # system field category of Tracker; the importer finds it by its Russian name
+    _STANDARD_CATEGORY_FIELD = "Системные"
 
     def __init__(self):
         self._collected_statuses = {}

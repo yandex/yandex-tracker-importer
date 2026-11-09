@@ -25,7 +25,8 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
-CATEGORY_NAME = {"en": "Kaiten", "ru": "Kaiten"}
+# system field category of Tracker; the importer finds it by its Russian name
+FIELD_CATEGORY = "Системные"
 
 # an archived card is an issue with this tag, off the board and its sprints
 ARCHIVE_TAG = "Архив Kaiten"
@@ -255,7 +256,7 @@ class BoardToQueueDumper(BaseDumper):
                 continue
             key, name = self._local_fields[prop["id"]]
             result.append({
-                "category": CATEGORY_NAME["ru"],
+                "category": FIELD_CATEGORY,
                 "key": key,
                 "name": {"en": name, "ru": name},
                 "schema": self._get_field_schema(prop),

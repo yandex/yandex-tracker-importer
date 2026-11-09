@@ -40,7 +40,6 @@ class TrelloDumper:
         for board_id, queue_key in self._boards_mapper.items():
             yield self._dump_board(board_id, queue_key)
         self._dump_lists()
-        self._dump_category()
 
     def _dump_board(self, board_id: str, queue_key: str) -> BoardDumpResult:
         try:
@@ -90,19 +89,6 @@ class TrelloDumper:
                     "name": {"en": name, "ru": name}
                 }
                 for key, name in self._board_to_queue_dumper.collected_statuses.items()
-            ],
-            dump_path
-        )
-
-    def _dump_category(self) -> None:
-        STANDARD_ORDER_CATEGORY = 1
-        dump_path = os.path.join(self._data_path, "categories.yaml")
-        dump_to_yaml(
-            [
-                {
-                    "name": {"en": "From Trello", "ru": "Из Trello"},
-                    "order": STANDARD_ORDER_CATEGORY
-                }
             ],
             dump_path
         )
