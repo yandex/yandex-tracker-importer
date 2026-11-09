@@ -38,13 +38,11 @@ class TrelloDataFetcher:
 
             create_info, members, lists, custom_fields = self._execute_batch(urls)
             creator = create_info[0].get("memberCreator") if create_info else None
-            # an old board may have no creation action: its date is in its id, its author falls back to the token owner
-            created = (create_info[0].get("date") if create_info else None) or creation_time_from_id(board_data.get("id"))
+            # an old board may have no creation action: its author is the token owner
 
             return {
                 **board_data,
                 "creator": creator or self._get_token_owner(),
-                "created": created,
                 "members": members or [],
                 "lists": lists or [],
                 "custom_fields": custom_fields or [],
@@ -132,8 +130,7 @@ class TrelloDataFetcher:
             "list_info": card_list or {},
             "custom_field_items": custom_fields or [],
             "attachments": attachments or [],
-            "board_custom_fields": board_custom_fields or [],
-            "board_id": board_id
+            "board_custom_fields": board_custom_fields or []
         })
 
         return card

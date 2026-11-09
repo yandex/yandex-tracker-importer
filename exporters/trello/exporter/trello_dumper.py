@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from .dumpers import BoardToProjectDumper, BoardToQueueDumper, CardDumper
+from .dumpers import BoardToQueueDumper, CardDumper
 from .dump_results import (
     BoardDumpResult,
     BoardDumpError,
@@ -26,7 +26,6 @@ class TrelloDumper:
 
         self._fetcher = TrelloDataFetcher(client, max_workers)
         self._board_to_queue_dumper = BoardToQueueDumper()
-        self._board_to_project_dumper = BoardToProjectDumper()
         self._card_dumper = CardDumper(client)
 
     @property
@@ -49,9 +48,6 @@ class TrelloDumper:
 
             queue_dump_path = os.path.join(self._data_path, "queues", queue_key)
             self._board_to_queue_dumper.dump(board_data, queue_dump_path, queue_key=queue_key)
-
-            project_dump_path = os.path.join(self._data_path, "projects", board_data.get("name", "UNKNOWN"))
-            self._board_to_project_dumper.dump(board_data, project_dump_path)
 
             card_results = self._dump_board_cards(board_id, queue_dump_path, queue_key)
 

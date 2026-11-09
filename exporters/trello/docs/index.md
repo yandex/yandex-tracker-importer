@@ -85,9 +85,8 @@ data/
 │           └── attachments/
 │               ├── file_123.pdf
 │               └── image_321.png
-├── projects/
-    └── <project_name>/
-        └── project.yaml
+├── statuses.yaml
+└── categories.yaml
 ```
 
 ## Требования

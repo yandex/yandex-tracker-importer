@@ -59,28 +59,6 @@ class BaseDumper(ABC):
             return data
 
 
-class BoardToProjectDumper(BaseDumper):
-    _STANDARD_TEAM_ACCESS = True
-
-    @property
-    def _filename(self) -> str:
-        return "project.yaml"
-
-    def dump(self, data: Dict[str, Any], dump_path: str) -> None:
-        prepared_data = {
-            "id": data.get("id"),
-            "summary": data.get("name"),
-            "createdAt": data.get("created"),
-            "createdBy": self._prepare_user(data.get("creator")),
-            "teamAccess": self._STANDARD_TEAM_ACCESS,
-            "description": data.get("desc"),
-            "author": self._prepare_user(data.get("creator")),
-            "teamUsers": [member.get("fullName") for member in data.get("members", [])]
-        }
-
-        self._clean_and_save_data(prepared_data, dump_path)
-
-
 class BoardToQueueDumper(BaseDumper):
 
     _STANDARD_DEFAULT_TYPE = "task"
@@ -256,7 +234,6 @@ class CardDumper(BaseDumper):
             "checklistItems": self._prepare_checklists(data.get("checklists", [])),
             "comments": self._prepare_comments(data.get("comments", [])),
             "attachments": self._prepare_attachments(data.get("attachments", []), create_info.get("memberCreator")),
-            "project": {"primary": data.get("board_id")},
             **self._prepare_local_fields(data)
         }
 
