@@ -25,8 +25,12 @@ SYSTEM_FIELDS_CATEGORY_ID = "000000000000000000000001"
 class CategoryImporter(GlobalObjectImporter):
     def __init__(self, client: TrackerClient, mapper: EntityMapper, data_path: str):
         super().__init__(client, mapper, data_path)
-        for category in self._client.field_categories.get_all():
-            self._put_to_cache(category.name, category)
+        # выгрузка ссылается на категорию русским названием; без localized=False API отдаёт название на
+        # языке интерфейса владельца токена
+        for category in self._client.field_categories.get_all(localized=False):
+            name = category.name.get("ru") if isinstance(category.name, dict) else category.name
+            if name:
+                self._put_to_cache(name, category)
 
     def _load_objects_data(self, global_object_path: str) -> Dict[str, Dict[str, Any]]:
         return {

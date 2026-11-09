@@ -394,9 +394,7 @@ account, it is skipped`.
 ## Структура `local_fields`
 
 ```yaml
-- category:
-    en: System
-    ru: Системные
+- category: Системные
   description: Have access to
   key: haveAccess
   name:
@@ -413,7 +411,7 @@ account, it is skipped`.
 |----------------------------------------------|------------|------------------------------------------|
 | `key`<span style="color: red;">*</span>      | Строка     | Уникальный ключ поля                     |
 | `name`<span style="color: red;">*</span>     | Объект     | Название поля на двух языках             |
-| `category`<span style="color: red;">*</span> | Строка     | Категория поля на русском языке          |
+| `category`<span style="color: red;">*</span> | Строка     | Категория поля: название на русском языке — существующей категории или из `categories.yaml` |
 | `schema`<span style="color: red;">*</span>   | Объект     | Тип поля                                 |
 | `description`                                | Строка     | Описание поля                            |
 | `optionsProvider`                            | Объект     | Объект с информацией об элементах списка |
