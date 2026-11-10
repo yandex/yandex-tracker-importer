@@ -11,12 +11,12 @@ from .base import CachedImporter
 from .entities import ProjectImporter
 from .fields import GlobalFieldImporter
 from .global_objects import IssueTypeImporter, ResolutionImporter
+from ..acl import AclUpdater
 from ..exceptions import BoardNotInDumpError
-from ..groups import GroupResolver
 from ..mapper import EntityMapper
 from ..state import ImportState
 from ..tracker_collections import update_template_permissions
-from ..utils import clean_empty, get_optional, prepare_checklist_item_data, prepare_field_value
+from ..utils import prepare_checklist_item_data, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
@@ -36,9 +36,7 @@ class TemplateImporter(CachedImporter, ABC):
     def __init__(self, client: TrackerClient, mapper: EntityMapper, state_path: str) -> None:
         super().__init__(client, mapper)
         self._state = ImportState(state_path, self.state_file)
-        self._group_resolver = GroupResolver(client, mapper)
-        self._myself = None
-        self._user_uids = {}
+        self._acl = AclUpdater(client, mapper)
 
     @property
     @abstractmethod
@@ -97,79 +95,14 @@ class TemplateImporter(CachedImporter, ABC):
         }
 
     def _update_permissions(self, template: Resource, input_data: Dict[str, Any]) -> None:
-        """Снятие и выдача — отдельными запросами: один отвергнутый субъект проваливает весь запрос,
-        и шаблон остался бы с правами шире исходных."""
-        name = f"{self.object_name} {input_data['name']}"
-        try:
-            current = self.collection.get(template.id, expand="permissions")
-            update = self._get_permissions_update(input_data["permissions"], current.as_dict().get("permissions") or {}, name)
-        except Exception:
-            logger.exception(f"Error updating permissions of {name}")
-            return
-
-        for operation in ("revoke", "grant"):
-            if not update.get(operation):
-                continue
-            try:
-                version = self.collection.get(template.id).version
-                update_template_permissions(
-                    self.collection, self.collection_path, template.id, version, {operation: update[operation]}
-                )
-            except Exception:
-                logger.exception(f"Error updating permissions of {name} with data: {{{operation!r}: {update[operation]}}}")
-
-    def _get_permissions_update(self, permissions: Dict[str, Any], current: Dict[str, Any], name: str) -> Dict[str, Any]:
-        """Недостающие права выдаются, лишние снимаются. Пользователи и группы сравниваются по
-        номерам; если кого-то из них не удалось найти, этот вид прав не снимается."""
-        myself = self._get_myself()
-        myself_uid = str(myself.uid)
-        grant, revoke = {}, {}
-        for permission in set(permissions) | set(current):
-            subjects = permissions.get(permission) or {}
-            current_subjects = current.get(permission) or {}
-            resolvers = {
-                "users": lambda user: self._get_user_uid(user, name),
-                "groups": lambda group: self._get_group_id(group, name),
-                "roles": lambda role: role,
-            }
-            wanted, complete = {}, {}
-            for kind, resolve in resolvers.items():
-                resolved = [resolve(item) for item in subjects.get(kind) or []]
-                wanted[kind] = set(resolved) - {None}
-                complete[kind] = None not in resolved
-            existing = {kind: {str(item["id"]) for item in current_subjects.get(kind) or []} for kind in resolvers}
-            grant[permission] = {kind: sorted(wanted[kind] - existing[kind]) for kind in resolvers}
-            revoke[permission] = {
-                kind: sorted(existing[kind] - wanted[kind]) for kind in resolvers if complete[kind]
-            }
-            if myself_uid in revoke[permission].get("users", []) and not get_optional(myself, "admin"):
-                # без своих прав учётная запись не администратора не прочитает шаблон на следующем прогоне
-                revoke[permission]["users"].remove(myself_uid)
-                logger.warning(f"{permission} permission of the import account is kept in {name}: it is not an administrator")
-        return clean_empty({"grant": grant, "revoke": revoke})
-
-    def _get_user_uid(self, user: str, name: str) -> Optional[str]:
-        target = self._mapper.get_user(user)
-        if target not in self._user_uids:
-            try:
-                self._user_uids[target] = str(self._client.users.get(target).uid)
-            except Exception:
-                logger.warning(f"User {user} is not found, it is skipped in permissions of {name}: check mapping/users.cfg")
-                self._user_uids[target] = None
-        return self._user_uids[target]
-
-    def _get_group_id(self, group: str, name: str) -> Optional[str]:
-        group_id = self._group_resolver.get_group_id(group)
-        if group_id is None:
-            # доступ без пропущенной группы только сужается, но молча такое не проходит
-            logger.warning(f"Group {group} is not found, it is skipped in permissions of {name}: check mapping/groups.cfg")
-            return None
-        return str(group_id)
-
-    def _get_myself(self) -> Resource:
-        if self._myself is None:
-            self._myself = self._client.myself
-        return self._myself
+        self._acl.update(
+            f"{self.object_name} {input_data['name']}",
+            input_data["permissions"],
+            lambda: self.collection.get(template.id, expand="permissions").as_dict().get("permissions"),
+            lambda data: update_template_permissions(
+                self.collection, self.collection_path, template.id, self.collection.get(template.id).version, data
+            ),
+        )
 
     @property
     @abstractmethod

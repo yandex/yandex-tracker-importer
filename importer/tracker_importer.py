@@ -121,7 +121,8 @@ class TrackerImporter:
         )
         self._comment_template_importer = CommentTemplateImporter(client, mapper, self._state_path)
         self._dashboard_importer = DashboardImporter(
-            client, mapper, self._global_field_importer, self._filter_importer, self._state_path, ui_url
+            client, mapper, self._global_field_importer, self._filter_importer, self._state_path, ui_url,
+            status_importer=self._status_importer, board_importer=self._board_importer,
         )
 
         self._trigger_importers = {}

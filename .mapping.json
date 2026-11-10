@@ -59,6 +59,7 @@
   "exporters/trello/requirements.txt":"tracker/scripts/trackin/exporters/trello/requirements.txt",
   "importer/__init__.py":"tracker/scripts/trackin/importer/__init__.py",
   "importer/__main__.py":"tracker/scripts/trackin/importer/__main__.py",
+  "importer/acl.py":"tracker/scripts/trackin/importer/acl.py",
   "importer/app.py":"tracker/scripts/trackin/importer/app.py",
   "importer/config.py":"tracker/scripts/trackin/importer/config.py",
   "importer/constants.py":"tracker/scripts/trackin/importer/constants.py",

@@ -48,6 +48,21 @@ class Dashboards(Collection):
             data={"widgets": widgets},
         )
 
+    def import_object(self, **kwargs):
+        """Создание с автором (`createdBy`) и датой создания (`start`)."""
+        return self._execute_request(
+            self._connection.post,
+            path="/{api_version}/dashboards/_import",
+            data=kwargs,
+        )
+
+    def get_permissions(self, dashboard_id: Any) -> Dict[str, Any]:
+        """Права дашборда: `{"acl": {"READ": …, "WRITE": …, "GRANT": …}}`."""
+        return self._execute_request(
+            self._connection.get,
+            path=f"/{{api_version}}/dashboards/{dashboard_id}/permissions",
+        )
+
 
 class Widgets(Collection):
     # виджет создаётся в дашборде, а удаляется обновлением набора виджетов (см. set_widgets_state)
@@ -74,6 +89,14 @@ class Widgets(Collection):
         return self._execute_request(
             self._connection.post,
             path=f"/{{api_version}}/dashboards/{dashboard_id}/widgets",
+            data=kwargs,
+        )
+
+    def import_in_dashboard(self, dashboard_id: Any, **kwargs):
+        """Создание с автором (`createdBy`) и датой создания (`start`); принимает не все виды виджетов."""
+        return self._execute_request(
+            self._connection.post,
+            path=f"/{{api_version}}/dashboards/{dashboard_id}/widgets/_import",
             data=kwargs,
         )
 
@@ -109,8 +132,8 @@ def get_widgets(client: TrackerClient) -> Widgets:
 
 
 def update_template_permissions(collection: Any, path: str, template_id: Any, version: Any, data: Dict[str, Any]):
-    """Права шаблона задачи или комментария — отдельный метод API с номером версии шаблона:
-    `grant` и `revoke` по видам прав."""
+    """Права шаблона задачи или комментария и дашборда — отдельный метод API с номером версии
+    объекта: `grant` и `revoke` по видам прав."""
     return collection._execute_request(
         collection._connection.patch,
         path=f"/{{api_version}}/{path}/{template_id}/permissions",
