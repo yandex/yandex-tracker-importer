@@ -611,9 +611,7 @@ class QueueImporter(GetOrCreateImporter):
         # без запрета в выгрузке права тоже проверяются, чтобы сообщить о ручном запрете
         deny = self._pending_deny.get(queue_key) or {}
         try:
-            if self._myself is None:
-                self._myself = self._client.myself
-            myself = self._myself
+            myself = self._get_myself()
             applied = (get_user_queue_permissions(self._client, queue_key, myself.uid).get("permissions") or {}).get("DENY")
             if not applied:
                 return
@@ -750,8 +748,9 @@ class QueueImporter(GetOrCreateImporter):
 
     def update_component_permissions(self) -> None:
         """Добавляет права компонентов из выгрузки к существующим у очередей, задачи которых импорт прошёл.
-        Роли и группы ставятся отдельным запросом до пользователей: пользователь, которого нет в целевой
-        организации, не мешает ограничить доступ к задачам компонента."""
+        Учётная запись импорта добавляется в `create` и `write`: повторный импорт создаёт задачи с компонентом
+        и заполняет их. Роли и группы ставятся отдельным запросом до пользователей: пользователь, которого нет
+        в целевой организации, не мешает ограничить доступ к задачам компонента."""
         # очереди с неудачными задачами, у компонентов которых есть права
         restricted_queues = set()
         for queue_key, component, permissions in self._pending_component_permissions:
@@ -796,6 +795,7 @@ class QueueImporter(GetOrCreateImporter):
                     )
             if applied or had_permissions:
                 restricted_queues.add(queue_key)
+                self._add_import_account(component, queue_key)
             if applied:
                 if not failed:
                     logger.info(f"Successfully updated permissions for component {component.name} of queue {queue_key}")
@@ -811,11 +811,30 @@ class QueueImporter(GetOrCreateImporter):
             if self._issues_imported[queue_key]:
                 # права ставятся и при неудачных задачах: перенесённые задачи компонентов закрываются сразу
                 logger.warning(
-                    f"Issues of queue {queue_key} not imported: {self._issues_imported[queue_key]}; a re-run creates those "
-                    "of them with a component that has permissions if the import account owns the queue or is in "
-                    "create, read and write of the component"
+                    f"Issues of queue {queue_key} not imported: {self._issues_imported[queue_key]}; run the import again"
                 )
         self._pending_component_permissions = []
+
+    def _add_import_account(self, component: Resource, queue_key: str) -> None:
+        """Добавляет учётную запись импорта в `create` и `write` компонента. Вызывается только для компонента
+        с правами: права у компонента без прав закрывают его задачи от прав очереди."""
+        try:
+            version = self._client.components[component.id].permissions.version
+            update_component_permissions(
+                self._client, component.id, version,
+                {permission_type: {"users": {"add": [self._get_myself().login]}} for permission_type in ("create", "write")},
+            )
+        except Exception:
+            logger.exception(
+                f"Error adding the import account to create and write of component {component.name} of queue "
+                f"{queue_key}: a re-run does not create issues with the component, add the import account to create "
+                "and write of the component manually"
+            )
+
+    def _get_myself(self) -> Resource:
+        if self._myself is None:
+            self._myself = self._client.myself
+        return self._myself
 
     @staticmethod
     def _report_open_component(component: Resource, queue_key: str) -> None:
