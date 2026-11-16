@@ -272,9 +272,11 @@ class IssueImporter(GetOrCreateImporter):
                     continue
 
                 try:
-                    local_fields_prepared_data[local_field_obj.id] = map_custom_user_field_value(
-                        local_field_obj, value, self._mapper
-                    )
+                    if local_field_obj.schema["type"] == "version" or local_field_obj.schema.get("items") == "version":
+                        prepared_value = self._prepare_versions(value)
+                    else:
+                        prepared_value = map_custom_user_field_value(local_field_obj, value, self._mapper)
+                    local_fields_prepared_data[local_field_obj.id] = prepared_value
                     source_keys[local_field_obj.id] = key
                 except Exception:
                     logger.exception(f"Error preparing local field '{key}' of issue {issue_obj.key} with value: {value}")
@@ -295,6 +297,20 @@ class IssueImporter(GetOrCreateImporter):
             except Exception:
                 logger.exception(f"Error setting local field '{source_keys[field_id]}' of issue {issue_obj.key} with value: {value}")
         return issue_obj
+
+    def _prepare_versions(self, value: Any) -> Any:
+        """Поле версий получает номер версии очереди, найденной по названию, как `fixVersions`: название из
+        цифр YAML читает числом, а число API принимает за номер версии. Экспорт Трекера пишет версию
+        ссылкой с названием в `display`."""
+        def version_id(version: Any) -> Any:
+            name = version.get("display") if isinstance(version, dict) else version
+            if name is None:
+                raise ValueError(f"Version {version} has no name")
+            return self._version_importer.get_version_by_name(str(name)).id
+
+        if isinstance(value, list):
+            return [version_id(version) for version in value]
+        return version_id(value) if value is not None else None
 
     def _update_local_fields(self, issue_obj: Resource, prepared_data: Dict[str, Any]) -> Resource:
         """Локальные поля только что созданной очереди API принимает в задаче не сразу: первые запросы
