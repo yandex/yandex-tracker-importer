@@ -1,7 +1,7 @@
 import logging
 from abc import ABC
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from yandex_tracker_client import TrackerClient
 from yandex_tracker_client.exceptions import NotFound
@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 # категория системных полей Трекера
 SYSTEM_FIELDS_CATEGORY_ID = "000000000000000000000001"
+
+# список строковых или числовых вариантов
+FIXED_LIST = "FixedListOptionsProvider"
 
 
 class CategoryImporter(GlobalObjectImporter):
@@ -131,6 +134,69 @@ class FieldImporter(CachedImporter, ABC):
             except Exception:
                 logger.exception(f"Error restoring readonly of field {field_obj.id}, set it manually")
 
+    def _add_missing_options(self, field_obj: Resource, input_data: Dict[str, Any]) -> Resource:
+        """Добавляет полю со списком варианты из выгрузки, которых у него нет; варианты не удаляются и не
+        переставляются. Список строится по свежему чтению поля, результат проверяется повторным чтением."""
+        options = input_data.get("optionsProvider")
+        if not isinstance(options, dict) or options.get("type") != FIXED_LIST or not isinstance(options.get("values"), list):
+            return field_obj
+        if self._options_type(field_obj) != FIXED_LIST:
+            return field_obj
+        missing = self._missing_options(field_obj, options["values"])
+        if not missing:
+            return field_obj
+        name = self._field_name(field_obj)
+        # вторая попытка — после конфликта с одновременным изменением поля
+        for _ in range(2):
+            try:
+                fresh = self._reload(field_obj)
+                if self._options_type(fresh) != FIXED_LIST:
+                    return fresh
+                # остальные настройки списка, например needValidation, сохраняются
+                provider = dict(get_optional(fresh, "optionsProvider") or {})
+                provider["values"] = self._option_values(fresh) + self._missing_options(fresh, missing)
+                self._update_options(fresh, provider)
+            except Exception:
+                logger.warning(f"Error response to adding options {missing} to field {name}, checking the field")
+            try:
+                updated = self._reload(field_obj)
+                not_added = self._missing_options(updated, missing)
+            except Exception:
+                logger.exception(f"Error checking options of field {name}, add {missing} manually")
+                return field_obj
+            if not not_added:
+                logger.info(f"Options {missing} are added to field {name}")
+                return updated
+        logger.error(f"Options {not_added} are not added to field {name}, add them manually")
+        return updated
+
+    @staticmethod
+    def _options_type(field_obj: Resource) -> Optional[str]:
+        return get_optional(get_optional(field_obj, "optionsProvider"), "type")
+
+    @staticmethod
+    def _option_values(field_obj: Resource) -> list:
+        return list(get_optional(get_optional(field_obj, "optionsProvider"), "values") or [])
+
+    def _missing_options(self, field_obj: Resource, values: list) -> list:
+        # число из API и то же число строкой в YAML — один вариант
+        present = {str(value) for value in self._option_values(field_obj)}
+        missing = []
+        for value in values:
+            if str(value) not in present:
+                present.add(str(value))
+                missing.append(value)
+        return missing
+
+    def _field_name(self, field_obj: Resource) -> str:
+        return str(get_optional(field_obj, "id"))
+
+    def _update_options(self, field_obj: Resource, options: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def _reload(self, field_obj: Resource) -> Resource:
+        raise NotImplementedError
+
     def _is_readonly(self, field_obj: Resource) -> bool:
         return bool(get_optional(field_obj, "readonly"))
 
@@ -177,6 +243,21 @@ class LocalFieldImporter(FieldImporter):
         # локальное поле изменяется по ключу в очереди
         self._queue_obj.collection.local_fields.update_field(field_obj.key, readonly=readonly)
 
+    def _search_object(self, input_data: Dict[str, Any]) -> Tuple[Optional[Resource], bool]:
+        obj, not_found = super()._search_object(input_data)
+        if obj is not None:
+            obj = self._add_missing_options(obj, input_data)
+        return obj, not_found
+
+    def _field_name(self, field_obj: Resource) -> str:
+        return f"{get_optional(field_obj, 'key')} of queue {self._queue_obj.key}"
+
+    def _update_options(self, field_obj: Resource, options: Dict[str, Any]) -> None:
+        self._queue_obj.collection.local_fields.update_field(field_obj.key, optionsProvider=options)
+
+    def _reload(self, field_obj: Resource) -> Resource:
+        return self._queue_obj.collection.local_fields.get(field_obj.key)
+
     def _get_key(self, input_data: Dict[str, Any]) -> Optional[str]:
         if "key" not in input_data:
             logger.error(
@@ -201,6 +282,8 @@ class GlobalFieldImporter(FieldImporter, GlobalObjectImporter):
     ):
         GlobalObjectImporter.__init__(self, client, mapper, data_path)
         FieldImporter.__init__(self, client, mapper, category_importer)
+        # ключи выгрузки, варианты которых сверены с полем
+        self._options_checked = set()
 
     @property
     def object_name(self) -> str:
@@ -210,12 +293,32 @@ class GlobalFieldImporter(FieldImporter, GlobalObjectImporter):
         # изменение глобального поля требует его текущей версии
         self._client.fields.get(field_obj.id).update(readonly=readonly)
 
+    def _update_options(self, field_obj: Resource, options: Dict[str, Any]) -> None:
+        # изменение вариантов отвечает 500, хотя применяется: итог проверяет повторное чтение
+        field_obj.update(optionsProvider=options)
+
+    def _reload(self, field_obj: Resource) -> Resource:
+        return self._client.fields.get(field_obj.id)
+
     @property
     def _filename(self) -> str:
         return "global_fields.yaml"
 
     def get_or_create(self, key: str) -> Optional[Resource]:
-        return GlobalObjectImporter.get_or_create(self, key)
+        """Варианты списка из выгрузки добавляются один раз на ключ выгрузки, в том числе если несколько
+        ключей сопоставлены одному полю."""
+        obj = GlobalObjectImporter.get_or_create(self, key)
+        if key in self._options_checked or key not in self._objects_data:
+            return obj
+        target = self._get_key(key)
+        with self._key_locks_guard:
+            key_lock = self._key_locks[target]
+        with key_lock:
+            if key not in self._options_checked:
+                obj = self._add_missing_options(self.get_from_cache(target) or obj, self._objects_data[key])
+                self._put_to_cache(target, obj)
+                self._options_checked.add(key)
+        return self.get_from_cache(target) or obj
 
     def _get_object(self, key: str) -> Optional[Resource]:
         obj = GlobalObjectImporter._get_object(self, key)
