@@ -187,6 +187,8 @@ def prepare_field_value(
             return process_value(value, lambda v: component_importer.get_component_by_name(v).id)
         case "fixVersions" | "affectedVersions" if version_importer is not None:
             return process_value(value, lambda v: version_importer.get_version_by_name(v).id)
+        case _ if is_version_field(field_obj) and version_importer is not None:
+            return process_value(value, lambda v: version_importer.get_version_by_name(version_name(v)).id)
         case "boards" | "sprint" if board_importer is not None:
             # номер перенесённой доски или спринта; без доски из выгрузки значение работало бы иначе
             getter = board_importer.get_board_id if field_obj.key == "boards" else board_importer.get_sprint_id
@@ -199,13 +201,28 @@ def prepare_field_value(
                 return target_id
 
             return process_value(value, map_board)
-        case "project" | "components" | "fixVersions" | "affectedVersions":
+        case _ if field_obj.key in ("project", "components", "fixVersions", "affectedVersions") or is_version_field(field_obj):
             logger.warning(
                 f"Field {field_obj.key} is bound to a queue and is left as is: {value}"
             )
             return value
         case _:
             return map_custom_user_field_value(field_obj, value, mapper)
+
+
+def version_name(version: Any) -> str:
+    """Название версии из значения поля «Версия»: название из цифр YAML читает числом, экспорт Трекера пишет
+    версию ссылкой с названием в `display`."""
+    name = version.get("display") if isinstance(version, dict) else version
+    if name is None or name == "":
+        raise ValueError(f"Version {version} has no name")
+    return str(name)
+
+
+def is_version_field(field_obj: Any) -> bool:
+    """Поле типа «Версия»: значения — версии очереди задачи."""
+    schema = get_optional(field_obj, "schema") or {}
+    return get_optional(schema, "type") == "version" or get_optional(schema, "items") == "version"
 
 
 def get_optional(obj: Any, key: str, default: Any = None) -> Any:

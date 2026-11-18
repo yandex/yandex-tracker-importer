@@ -18,7 +18,7 @@ from ..exceptions import (
 )
 from ..groups import GroupResolver
 from ..mapper import EntityMapper
-from ..utils import get_required_field, prepare_checklist_item_data, prepare_field_value
+from ..utils import get_required_field, is_version_field, prepare_checklist_item_data, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,7 @@ class AutomationImporter(CachedImporter):
         queue_bound = [
             key for key in field_templates
             if key.startswith("local_") or key in ("components", "fixVersions", "affectedVersions")
+            or is_version_field(self._get_or_create_field(key))
         ]
         if queue_bound and self._mapper.get_queue(target_queue) != self._queue_obj.key:
             raise FieldTemplatesNotSupportedError(target_queue, queue_bound)

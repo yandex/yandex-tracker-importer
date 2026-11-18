@@ -77,6 +77,8 @@ class FieldImporter(CachedImporter, ABC):
         "integer": "ru.yandex.startrek.core.fields.IntegerFieldType",
         "user": "ru.yandex.startrek.core.fields.UserFieldType",
         "uri": "ru.yandex.startrek.core.fields.UriFieldType",
+        # варианты — версии очереди задачи
+        "version": "ru.yandex.startrek.core.fields.VersionFieldType",
     }
 
     def __init__(self, client: TrackerClient, mapper: EntityMapper, category_importer: CategoryImporter):
@@ -210,9 +212,6 @@ class FieldImporter(CachedImporter, ABC):
 
 
 class LocalFieldImporter(FieldImporter):
-    # тип «Версия» есть только у локального поля: варианты — версии очереди
-    _type_relation_map = {**FieldImporter._type_relation_map, "version": "ru.yandex.startrek.core.fields.VersionFieldType"}
-
     def __init__(
         self,
         client: TrackerClient,

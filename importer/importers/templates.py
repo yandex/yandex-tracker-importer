@@ -16,7 +16,7 @@ from ..exceptions import BoardNotInDumpError
 from ..mapper import EntityMapper
 from ..state import ImportState
 from ..tracker_collections import update_template_permissions
-from ..utils import prepare_checklist_item_data, prepare_field_value
+from ..utils import is_version_field, prepare_checklist_item_data, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
@@ -202,7 +202,7 @@ class IssueTemplateImporter(TemplateImporter):
         return kept if isinstance(value, list) else (kept[0] if kept else None)
 
     def _prepare_field_value(self, field_obj: Resource, value: Any) -> Any:
-        if field_obj.key in QUEUE_BOUND_FIELDS:
+        if field_obj.key in QUEUE_BOUND_FIELDS or is_version_field(field_obj):
             return value
         if field_obj.key == "project" and isinstance(value, dict):
             # {"primary": 65, "secondary": [57]}: номера проектов переводятся в номера целевой организации

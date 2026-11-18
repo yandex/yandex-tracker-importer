@@ -12,7 +12,7 @@ from ..exceptions import BoardNotImportedError
 from ..mapper import EntityMapper
 from ..state import ImportState
 from ..tracker_collections import create_live_board, delete_sprint, update_sprint
-from ..utils import load_yaml_file, prepare_field_value
+from ..utils import is_version_field, load_yaml_file, prepare_field_value
 
 
 logger = logging.getLogger(__name__)
@@ -305,7 +305,7 @@ class BoardImporter:
             self._reference_importers[field_key].get_or_create(fixed)
         if field_key == "queue":
             fixed = self._mapper.get_queue(fixed)
-        elif field_key not in QUEUE_BOUND_FIELDS:
+        elif field_key not in QUEUE_BOUND_FIELDS and not is_version_field(field_obj):
             fixed = prepare_field_value(field_obj, fixed, self._mapper, project_importer=self._project_importer)
         return {**value, "fixed": fixed}
 
